@@ -39,7 +39,7 @@ specific Claude Code executable; it is validated at probe time. Login state is
 still the machine's own `~/.claude`.
 
 Production packages run with Prism's shared Node 22 runtime and depend on the
-published `@rokid-prism/pluginbridge-plugin-sdk`; the SDK is not copied into a
+published `@prism-rokid/pluginbridge-plugin-sdk`; the SDK is not copied into a
 plugin archive.
 
 For standalone development:
