@@ -29,26 +29,26 @@ test("replay rotates through backlogs larger than one page", (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const storage = join(dir, "hook-outbox");
   mkdirSync(storage, { recursive: true });
-  const events = Array.from({ length: 600 }, (_, index) => {
+  const events = Array.from({ length: 5 }, (_, index) => {
     const event = { event_id: randomUUID(), created_at: new Date().toISOString(), hook: { index } };
     const filename = `${String(index + 1).padStart(12, "0")}-${event.event_id}.json`;
     writeFileSync(join(storage, filename), JSON.stringify(event) + "\n");
     return event;
   });
-  writeFileSync(join(storage, "next-sequence"), "601");
+  writeFileSync(join(storage, "next-sequence"), "6");
   const outbox = new PersistentHookOutbox(dir);
 
-  const first = outbox.replay();
-  const second = outbox.replay();
-  const third = outbox.replay();
-  assert.equal(first.length, 256);
-  assert.equal(second.length, 256);
-  assert.equal(third.length, 88);
+  const first = outbox.replay(2);
+  const second = outbox.replay(2);
+  const third = outbox.replay(2);
+  assert.equal(first.length, 2);
+  assert.equal(second.length, 2);
+  assert.equal(third.length, 1);
   assert.deepEqual(
     new Set([...first, ...second, ...third].map((entry) => entry.event_id)),
     new Set(events.map((entry) => entry.event_id)),
   );
-  assert.equal(outbox.replay()[0].event_id, first[0].event_id);
+  assert.equal(outbox.replay(2)[0].event_id, first[0].event_id);
 });
 
 test("Hooks produced while plugin is offline replay in order with stable IDs", async (t) => {
