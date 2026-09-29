@@ -166,7 +166,7 @@ export class ManagedSupervisor {
     } else if (kind === "UserPromptSubmit" && typeof hook.prompt === "string") {
       this.broker.input.promptSubmitted(hook.prompt, typeof hook.turn_id === "string" ? hook.turn_id : "");
     } else if (kind === "Stop" || kind === "StopFailure") {
-      this.broker.input.turnCompleted(typeof hook.turn_id === "string" ? hook.turn_id : undefined);
+      this.broker.input.turnCompleted(typeof hook.turn_id === "string" ? hook.turn_id : undefined, kind === "StopFailure");
       this.broker.input.setApprovalPending(false);
     } else if (kind === "PermissionRequest") {
       if (this.broker.snapshot().input_owner === "panel") {

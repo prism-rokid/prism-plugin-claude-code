@@ -57,7 +57,7 @@ export class ManagedClaudeAdapter implements PluginAdapter {
       CanAttachSession: true, CanStartSessionWithMessage: true, CanOpenDraft: true,
       CanListSessions: true, CanReadHistory: true, CanInterrupt: true, CanApproval: true,
       CanForwardSync: true, CanReverseSync: true, CanPluginWideWatch: false,
-      CanWaitRun: false, CanReadStatus: true, CanControlSession: false, CanOpenManagedTerminal: true,
+      CanWaitRun: true, CanReadStatus: true, CanControlSession: false, CanOpenManagedTerminal: true,
       IntegrationMode: "protocol-native", VisibilitySurface: SURFACE,
       UnavailableReason: available ? "" : `Claude CLI unavailable: ${check.error?.message || check.stderr || "version check failed"}`,
     };
@@ -166,6 +166,33 @@ export class ManagedClaudeAdapter implements PluginAdapter {
     const record = await client.delivery(marker);
     const visible = record?.state === "submitted" || record?.state === "completed";
     return { Visible: visible, Marker: marker, Evidence: visible ? "Claude UserPromptSubmit hook" : "", CheckedAt: now(), FailureReason: visible ? "" : "Prompt submission not confirmed" };
+  }
+  async waitForRun(native: NativeSession, runID: string): Promise<PluginEvent> {
+    const deadline = Date.now() + 14 * 60_000;
+    const fallback = (summary: string): PluginEvent => ({
+      ID: `${runID}:wait-unconfirmed`, Type: "run.wait_timeout", Status: "running", Summary: summary,
+      Payload: { timeout_fallback: true }, CreatedAt: now(),
+    });
+    while (Date.now() < deadline) {
+      let client: ManagedSupervisorClient;
+      try { client = await this.manager.connect(native.NativeSessionID); }
+      catch { return fallback("Claude managed supervisor is unavailable; verify the local session before retrying"); }
+      let record: Awaited<ReturnType<ManagedSupervisorClient["delivery"]>>;
+      try { record = await client.delivery(runID); }
+      catch { return fallback("Claude delivery status is unavailable; completion cannot be confirmed"); }
+      if (!record) return fallback("Claude delivery record is unavailable; completion cannot be confirmed");
+      if (record.state === "completed" || record.state === "failed") return {
+        ID: `${runID}:${record.state}`, Type: record.state === "failed" ? "run.failed" : "run.completed",
+        Status: record.state, Summary: record.state === "failed" ? "Claude turn failed" : "Claude turn completed",
+        Payload: {}, CreatedAt: record.updated_at,
+      };
+      if (record.state === "indeterminate") return fallback("Claude prompt delivery is uncertain; completion cannot be confirmed");
+      try {
+        if ((await client.refresh()).status === "stopped") return fallback("Claude terminal stopped before run completion was confirmed");
+      } catch { return fallback("Claude terminal status is unavailable; completion cannot be confirmed"); }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return fallback("Claude run completion was not confirmed within the waiting window");
   }
   async readDetail(native: NativeSession): Promise<Record<string, unknown>> {
     if (!this.manager.hasManagedState(native.NativeSessionID)) {

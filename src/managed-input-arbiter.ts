@@ -255,9 +255,9 @@ export class ManagedInputArbiter {
     this.changed();
   }
 
-  turnCompleted(promptID?: string): void {
+  turnCompleted(promptID?: string, failed = false): void {
     for (const record of this.ledger.snapshot()) {
-      if (record.state === "submitted" && (!promptID || !record.prompt_id || record.prompt_id === promptID)) this.ledger.transition(record.request_id, "completed");
+      if (record.state === "submitted" && (!promptID || !record.prompt_id || record.prompt_id === promptID)) this.ledger.transition(record.request_id, failed ? "failed" : "completed");
     }
     this.busy = false;
     this.changed();

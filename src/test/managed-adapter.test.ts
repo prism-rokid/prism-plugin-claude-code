@@ -70,6 +70,17 @@ test("managed adapter attaches the exact native supervisor and confirms Panel se
   assert.equal(await new Promise<number | null>((resolve) => permission.once("exit", resolve)), 0);
   assert.equal(JSON.parse(permissionOutput).hookSpecificOutput.decision.behavior, "allow");
   assert.equal((await adapter.readDetail(native)).approval, null);
+  assert.equal(adapter.probe().CanWaitRun, true);
+  let settled = false;
+  const waiting = adapter.waitForRun(native, "message-1").then((event) => { settled = true; return event; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(settled, false);
+  const stop = spawn(process.execPath, [hookScript, supervisor.descriptorPath], { stdio: ["pipe", "ignore", "pipe"] });
+  stop.stdin.end(JSON.stringify({ session_id: sessionID, hook_event_name: "Stop" }));
+  assert.equal(await new Promise<number | null>((resolve) => stop.once("exit", resolve)), 0);
+  const completion = await waiting;
+  assert.equal(completion.Type, "run.completed");
+  assert.equal(completion.Status, "completed");
 });
 
 test("a new plugin subscription receives the same durable Hook event ID after reconnect", async (t) => {

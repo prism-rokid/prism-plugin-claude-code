@@ -27,6 +27,15 @@ test("local attachment owns stdin and blocks Panel without changing the draft", 
   assert.equal(h.arbiter.snapshot().input_owner, "local");
 });
 
+test("failed Claude stop remains failed in the durable delivery ledger", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  assert.equal((await h.arbiter.panelSend("failed-message", "hello")).status, "accepted");
+  h.arbiter.promptSubmitted("hello", "");
+  h.arbiter.turnCompleted(undefined, true);
+  assert.equal(h.ledger.get("failed-message")?.state, "failed");
+});
+
 test("Ctrl-] refuses handoff while a local draft is present and allows it after Ctrl-U", async (t) => {
   const h = harness();
   t.after(h.close);
