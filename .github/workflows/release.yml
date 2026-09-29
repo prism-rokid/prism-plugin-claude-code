@@ -60,9 +60,12 @@ jobs:
       - name: Test Claude session ownership suite on Windows
         if: matrix.target == 'windows-x64'
         run: node --test dist/test/claude-session-ownership.test.js
-      - name: Test managed adapter replay and discovery paths on Windows
+      - name: Test managed adapter replay path on Windows
         if: matrix.target == 'windows-x64'
-        run: node --test --test-name-pattern="new plugin subscription|plugin-wide watcher" dist/test/managed-adapter.test.js
+        run: node --test --test-name-pattern="new plugin subscription" dist/test/managed-adapter.test.js
+      - name: Test managed adapter discovery path on Windows
+        if: matrix.target == 'windows-x64'
+        run: node --test --test-name-pattern="plugin-wide watcher" dist/test/managed-adapter.test.js
       - name: Test managed Hook outbox suite on Windows
         if: matrix.target == 'windows-x64'
         run: node --test dist/test/managed-hook-outbox.test.js
