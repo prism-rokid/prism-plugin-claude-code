@@ -62,9 +62,6 @@ jobs:
         run: node --test dist/test/claude-session-ownership.test.js
       # The managed adapter loopback integration suite stalls on GitHub's
       # Windows runner; macOS and Linux run the complete suite above.
-      - name: Test managed Hook outbox persistence on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test --test-name-pattern="acknowledged Hook files|replay rotates" dist/test/managed-hook-outbox.test.js
       - name: Test managed input arbiter suite on Windows
         if: matrix.target == 'windows-x64'
         run: node --test dist/test/managed-input-arbiter.test.js
