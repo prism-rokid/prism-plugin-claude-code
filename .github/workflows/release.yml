@@ -17,8 +17,8 @@ jobs:
         include:
           - target: macos-arm64
             runner: macos-14
-            # runner_labels: self-hosted label set used when USE_SELF_HOSTED is
-            # unset/true; 'null' falls back to the GitHub-hosted runner above.
+            # runner_labels: optional self-hosted label set used only when
+            # USE_SELF_HOSTED is explicitly true; 'null' uses the hosted runner.
             runner_labels: '["self-hosted","macOS","ARM64"]'
           - target: macos-x64
             runner: macos-15-intel
@@ -29,9 +29,8 @@ jobs:
           - target: linux-x64
             runner: ubuntu-22.04
             runner_labels: 'null'
-    # USE_SELF_HOSTED (Actions variable): unset/true routes macos-arm64 and windows-x64
-    # builds to org self-hosted runners; 'false' keeps everything GitHub-hosted.
-    runs-on: ${{ vars.USE_SELF_HOSTED != 'false' && fromJSON(matrix.runner_labels) || matrix.runner }}
+    # Use GitHub-hosted runners unless USE_SELF_HOSTED is explicitly enabled.
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && fromJSON(matrix.runner_labels) || matrix.runner }}
     env:
       PRISM_PLATFORM: ${{ matrix.target }}
       # The lockfile pins every tarball to registry.npmjs.org. npm would
