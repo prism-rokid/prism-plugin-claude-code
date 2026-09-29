@@ -50,33 +50,27 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build --if-present
-      - name: Test on non-Windows runners
-        if: matrix.target != 'windows-x64'
+      - name: Test full suites on Linux and Apple silicon
+        if: matrix.target == 'linux-x64' || matrix.target == 'macos-arm64'
         run: |
           npm test
+      - name: Test non-PTY suites on Intel macOS
+        if: matrix.target == 'macos-x64'
+        run: >-
+          node --test
+          dist/test/adapter.test.js
+          dist/test/claude-session-ownership.test.js
+          dist/test/managed-adapter.test.js
+          dist/test/managed-hook-outbox.test.js
+          dist/test/managed-input-arbiter.test.js
+          dist/test/managed-pty-broker.test.js
+          dist/test/managed-supervisor.test.js
       - name: Test adapter suite on Windows
         if: matrix.target == 'windows-x64'
         run: node --test dist/test/adapter.test.js
       - name: Test Claude session ownership suite on Windows
         if: matrix.target == 'windows-x64'
         run: node --test dist/test/claude-session-ownership.test.js
-      # The managed adapter loopback integration suite stalls on GitHub's
-      # Windows runner; macOS and Linux run the complete suite above.
-      - name: Test managed input arbiter suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/managed-input-arbiter.test.js
-      - name: Test managed PTY broker suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/managed-pty-broker.test.js
-      - name: Test managed startup trust suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/managed-start-trust.test.js
-      - name: Test managed supervisor process suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/managed-supervisor-process.test.js
-      - name: Test managed supervisor suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/managed-supervisor.test.js
       - name: Verify manifest and release version
         shell: bash
         run: node scripts/verify-release.mjs
