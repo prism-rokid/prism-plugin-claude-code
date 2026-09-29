@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -26,8 +27,16 @@ test("acknowledged Hook files stay removed and sequence remains monotonic after 
 test("replay rotates through backlogs larger than one page", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "prism-hook-pages-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const storage = join(dir, "hook-outbox");
+  mkdirSync(storage, { recursive: true });
+  const events = Array.from({ length: 600 }, (_, index) => {
+    const event = { event_id: randomUUID(), created_at: new Date().toISOString(), hook: { index } };
+    const filename = `${String(index + 1).padStart(12, "0")}-${event.event_id}.json`;
+    writeFileSync(join(storage, filename), JSON.stringify(event) + "\n");
+    return event;
+  });
+  writeFileSync(join(storage, "next-sequence"), "601");
   const outbox = new PersistentHookOutbox(dir);
-  const events = Array.from({ length: 600 }, (_, index) => outbox.append({ index }));
 
   const first = outbox.replay();
   const second = outbox.replay();
