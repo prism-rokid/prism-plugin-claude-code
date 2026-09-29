@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, watch } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PluginAdapterError, type ApprovalResolutionRequest, type AttachSessionRequest, type Capability, type DiscoveryResult, type DraftOpenRequest, type DraftOpenResult, type HistoryMessage, type HistoryStreamEvent, type HistoryStreamRequest, type InboundMessage, type ManagedTerminalRequest, type NativeSession, type NativeSessionHint, type PluginAdapter, type PluginEvent, type RunStatus, type SendReceipt, type StartDraftWithMessageRequest, type StartSessionWithMessageRequest, type StartSessionWithMessageResult, type VisibilityResult } from "@rokid-prism/pluginbridge-plugin-sdk";
@@ -14,6 +14,9 @@ const SURFACE = "claudecode-managed-pty";
 const CONFIRM_TIMEOUT_MS = 10_000;
 function now(): string { return new Date().toISOString(); }
 function canonicalCwd(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
+function conversationTitle(value: string | undefined): string {
+  return value?.replace(/\s+/g, " ").trim().slice(0, 100) || "Claude Code";
+}
 function session(id: string, cwd: string): NativeSession {
   return { PluginID: PLUGIN_ID, NativeSessionID: id, NativeThreadID: id, Surface: SURFACE, Endpoint: "local managed Claude PTY", Cwd: cwd, Visible: true };
 }
@@ -42,8 +45,10 @@ export class ManagedClaudeAdapter implements PluginAdapter {
   private readonly manager: ManagedSupervisorManager;
   private readonly reader = new ClaudeSdkRuntime({ onUpdate() {}, onPermission: async () => ({ outcome: "deny", message: "read-only transcript reader" }), onStderr() {} });
   private readonly subscribers = new Map<string, Set<EventQueue>>();
+  private readonly pluginSubscribers = new Set<EventQueue>();
   private readonly drafts = new Map<string, string>();
   private readonly migrations = new Map<string, Promise<ManagedSupervisorClient>>();
+  private readonly openingTerminals = new Set<string>();
   constructor(baseDir?: string) {
     this.manager = new ManagedSupervisorManager(baseDir, (id, state) => this.publish(id, "desktop.state.changed", "running", "Claude terminal state changed", { detail_snapshot: { terminal: state } }), (id, hook, eventID, replayed, createdAt) => this.handleHook(id, hook, eventID, replayed, createdAt));
   }
@@ -56,7 +61,7 @@ export class ManagedClaudeAdapter implements PluginAdapter {
       PluginID: PLUGIN_ID, Available: available, NativeVisibleInput: true, NativeVisibleOutput: true,
       CanAttachSession: true, CanStartSessionWithMessage: true, CanOpenDraft: true,
       CanListSessions: true, CanReadHistory: true, CanInterrupt: true, CanApproval: true,
-      CanForwardSync: true, CanReverseSync: true, CanPluginWideWatch: false,
+      CanForwardSync: true, CanReverseSync: true, CanPluginWideWatch: true,
       CanWaitRun: true, CanReadStatus: true, CanControlSession: false, CanOpenManagedTerminal: true,
       IntegrationMode: "protocol-native", VisibilitySurface: SURFACE,
       UnavailableReason: available ? "" : `Claude CLI unavailable: ${check.error?.message || check.stderr || "version check failed"}`,
@@ -115,7 +120,8 @@ export class ManagedClaudeAdapter implements PluginAdapter {
       try {
         const client = await this.manager.connect(id);
         const terminal = await client.refresh();
-        hints.push({ PluginID: PLUGIN_ID, NativeSessionID: id, NativeThreadID: id, Surface: SURFACE, Endpoint: "local managed Claude PTY", Cwd: client.descriptor.cwd, Title: "Claude Code", PrismConversationID: "", Active: terminal.status !== "stopped", Visible: terminal.status !== "stopped", LastActivityAt: now(), Metadata: { terminal_status: terminal.status } });
+        const info = await this.reader.sessionInfo(id).catch(() => undefined);
+        hints.push({ PluginID: PLUGIN_ID, NativeSessionID: id, NativeThreadID: id, Surface: SURFACE, Endpoint: "local managed Claude PTY", Cwd: client.descriptor.cwd, Title: conversationTitle(info?.title), PrismConversationID: "", Active: terminal.status !== "stopped", Visible: terminal.status !== "stopped", LastActivityAt: info?.updatedAt || now(), Metadata: { terminal_status: terminal.status } });
       } catch { /* stale supervisor descriptors are not live sessions */ }
     }
     return hints;
@@ -150,6 +156,12 @@ export class ManagedClaudeAdapter implements PluginAdapter {
     if (result.status === "busy") throw new PluginAdapterError("session_busy", result.detail);
     if (result.status === "invalid") throw new PluginAdapterError("invalid_message", result.detail);
     if (result.status === "indeterminate") throw new PluginAdapterError("delivery_indeterminate", result.detail);
+    // The remote prompt now owns the PTY input lease. A native Terminal opened
+    // here observes that same run read-only, while the send remains independent
+    // of whether a desktop window can be launched.
+    if (result.status === "accepted") {
+      this.autoOpenTerminal(id, client);
+    }
     const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const record = await client.delivery(msg.PrismMessageID);
@@ -298,6 +310,99 @@ export class ManagedClaudeAdapter implements PluginAdapter {
       for await (const event of queue) yield event;
     } finally { if (poll) clearInterval(poll); if (replayPoll) clearInterval(replayPoll); queue.close(); listeners.delete(queue); signal?.removeEventListener("abort", abort); }
   }
+  async *subscribePlugin(signal?: AbortSignal): AsyncIterable<PluginEvent> {
+    const queue = new EventQueue();
+    this.pluginSubscribers.add(queue);
+    const subscriptions = new Map<string, AbortController>();
+    const titles = new Map<string, string>();
+    const promptTitles = new Map<string, string>();
+    const checkedTitlesAt = new Map<string, number>();
+    const abort = () => queue.close();
+    signal?.addEventListener("abort", abort, { once: true });
+    const publishIndex = (native: NativeSession, title: string, terminalStatus = "ready") => {
+      const id = native.NativeSessionID;
+      if (titles.get(id) === title) return;
+      titles.set(id, title);
+      queue.push({
+        ID: `${id}:index:${randomUUID()}`, Type: "desktop.session.index.changed", Status: "idle",
+        Summary: "Claude session directory item changed", CreatedAt: now(),
+        Payload: {
+          native_session: { plugin_id: PLUGIN_ID, native_session_id: id, native_thread_id: id, surface: SURFACE, endpoint: native.Endpoint, cwd: native.Cwd },
+          session_hint: { plugin_id: PLUGIN_ID, native_session_id: id, native_thread_id: id, surface: SURFACE, endpoint: native.Endpoint, cwd: native.Cwd, title, last_activity_at: now(), metadata: { terminal_status: terminalStatus } },
+        },
+      });
+    };
+    let scanning = false;
+    const scan = async () => {
+      if (scanning || signal?.aborted) return;
+      scanning = true;
+      try {
+        const live = new Set(this.manager.listSessionIDs());
+        for (const [id, controller] of subscriptions) {
+          if (!live.has(id)) {
+            controller.abort(); subscriptions.delete(id);
+            titles.delete(id); promptTitles.delete(id); checkedTitlesAt.delete(id);
+          }
+        }
+        for (const id of live) {
+          if (subscriptions.has(id)) {
+            if (Date.now() - (checkedTitlesAt.get(id) || 0) >= 5000) {
+              checkedTitlesAt.set(id, Date.now());
+              const info = await this.reader.sessionInfo(id).catch(() => undefined);
+              const title = conversationTitle(info?.title && info.title !== "Claude Code session" ? info.title : promptTitles.get(id));
+              const client = await this.manager.connect(id).catch(() => undefined);
+              if (client) publishIndex(session(id, client.descriptor.cwd), title);
+            }
+            continue;
+          }
+          let client: ManagedSupervisorClient;
+          try { client = await this.manager.connect(id); }
+          catch { continue; }
+          let terminal: TerminalSnapshot;
+          try { terminal = await client.refresh(); }
+          catch { continue; }
+          const native = session(id, client.descriptor.cwd);
+          const controller = new AbortController();
+          subscriptions.set(id, controller);
+          const info = await this.reader.sessionInfo(id).catch(() => undefined);
+          checkedTitlesAt.set(id, Date.now());
+          publishIndex(native, conversationTitle(info?.title && info.title !== "Claude Code session" ? info.title : undefined), terminal.status);
+          void (async () => {
+            try {
+              for await (const event of this.subscribe(native, controller.signal)) {
+                if (event.Type === "message.user.accepted" && typeof event.Payload.text === "string") {
+                  promptTitles.set(id, conversationTitle(event.Payload.text));
+                  const info = await this.reader.sessionInfo(id).catch(() => undefined);
+                  publishIndex(native, conversationTitle(info?.title && info.title !== "Claude Code session" ? info.title : promptTitles.get(id)));
+                }
+                queue.push({ ...event, Payload: {
+                  ...event.Payload,
+                  native_session: { plugin_id: PLUGIN_ID, native_session_id: id, native_thread_id: id, surface: SURFACE, endpoint: native.Endpoint, cwd: native.Cwd },
+                } });
+              }
+            } catch { /* A later scan can reconnect an unavailable supervisor. */ }
+            finally { if (subscriptions.get(id) === controller) subscriptions.delete(id); }
+          })();
+        }
+      } finally { scanning = false; }
+    };
+    let watcher: ReturnType<typeof watch> | undefined;
+    try { watcher = watch(this.manager.baseDir, () => { void scan(); }); }
+    catch { /* The interval below also discovers new sessions. */ }
+    const poll = setInterval(() => { void scan(); }, 1000);
+    try {
+      await scan();
+      for await (const event of queue) yield event;
+    } finally {
+      clearInterval(poll);
+      watcher?.close();
+      for (const controller of subscriptions.values()) controller.abort();
+      subscriptions.clear();
+      queue.close();
+      this.pluginSubscribers.delete(queue);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
   async ackEvent(native: NativeSession, eventID: string): Promise<void> {
     const prefix = `${native.NativeSessionID}:`;
     if (!eventID.startsWith(prefix)) throw new PluginAdapterError("event_ack_mismatch", "Claude event does not belong to this session");
@@ -316,8 +421,28 @@ export class ManagedClaudeAdapter implements PluginAdapter {
   }
   async close(): Promise<void> {
     for (const listeners of this.subscribers.values()) for (const queue of listeners) queue.close();
+    for (const queue of this.pluginSubscribers) queue.close();
     this.manager.close(); // The detached supervisor and native Claude PTY stay alive.
     await this.reader.close();
+  }
+  private autoOpenTerminal(id: string, client: ManagedSupervisorClient): void {
+    if (this.openingTerminals.has(id)) return;
+    this.openingTerminals.add(id);
+    void (async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if ((await client.refresh()).status !== "detached") return;
+          await client.openTerminal(id);
+          return;
+        } catch (error) {
+          if (attempt === 1) {
+            process.stderr.write(`[claudecode] auto-open native Terminal failed for ${id}: ${error instanceof Error ? error.message : String(error)}\n`);
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
+      }
+    })().finally(() => this.openingTerminals.delete(id));
   }
   private historyMessage(entry: SdkTranscriptEntry): HistoryMessage {
     const stamp = entry.timestamp || "1970-01-01T00:00:00.000Z";

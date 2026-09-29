@@ -120,8 +120,8 @@ const BACKSPACE = new Set(["\x7f", "\x08"]);
 /**
  * Serializes every PTY write. Local Terminal is only a byte client of this
  * arbiter; it never receives a PTY file descriptor and cannot bypass owner
- * checks. Panel requests are accepted only after local input explicitly yields
- * or the local client has detached.
+ * checks. When Claude is idle, either surface can take the lease. An unfinished
+ * local draft keeps Panel from replacing the native composer's contents.
  */
 export class ManagedInputArbiter {
   private owner: ManagedInputOwner = null;
@@ -130,10 +130,12 @@ export class ManagedInputArbiter {
   private approvalPending = false;
   private remoteApprovalPending = false;
   private draftHasInput = false;
+  private escapeState: "none" | "escape" | "csi" | "osc" | "osc_escape" | "ss3" = "none";
   private status: ManagedTerminalStatus = "starting";
   private ready = false;
   private setupRequired = false;
   private writeChain: Promise<void> = Promise.resolve();
+  private lastStateSignature = "";
 
   constructor(
     private readonly sink: PtyInputSink,
@@ -142,14 +144,15 @@ export class ManagedInputArbiter {
   ) {}
 
   snapshot(): TerminalSnapshot {
-    const canSend = this.ready && (!this.localAttached || this.owner === "panel") && (this.owner === "panel" || this.owner === null) && !this.busy && !this.approvalPending && (this.status === "attached" || this.status === "detached");
+    const canSend = this.ready && !(this.owner === "local" && this.draftHasInput) && !this.busy && !this.approvalPending && (this.status === "attached" || this.status === "detached");
     const reason = this.setupRequired ? "Claude Code requires local project trust; open its managed Terminal and accept the workspace prompt"
       : !this.ready && this.status !== "stopped" ? "Waiting for Claude Code to start"
       : this.status === "reconnecting" ? "Reconnecting to Claude Code"
         : this.status === "stopped" ? "Claude CLI is stopped"
       : this.approvalPending ? "A permission request is awaiting approval"
         : this.busy ? "Claude Code is processing a turn"
-          : this.owner === "local" ? this.draftHasInput ? "Local draft remains in Claude Code; reattach and clear or submit it before Panel sends" : "Local Terminal owns input; hand off or detach to send from Panel"
+          : this.owner === "local" && this.draftHasInput
+            ? this.localAttached ? "Local draft remains in Claude Code; clear or submit it before Panel sends" : "Local draft remains in Claude Code; reattach and clear or submit it before Panel sends"
             : undefined;
     return {
       status: this.status,
@@ -201,11 +204,19 @@ export class ManagedInputArbiter {
       if (after) return await this.localInput(after);
       return transition;
     }
-    if (this.owner !== "local") return { accepted: false, reason: "Panel owns the single PTY input lease" };
-    if (this.ready) this.trackDraft(data);
+    const scanned = this.scanLocalInput(data);
+    let takeover = false;
+    if (this.owner === "panel" && scanned.hasText && this.ready && !this.busy && !this.approvalPending) {
+      // The first local keystroke after a Panel turn is an explicit local
+      // action. Claim the lease before forwarding those bytes to the PTY.
+      this.owner = "local";
+      takeover = true;
+    }
+    if (this.owner !== "local") return { accepted: false, reason: this.snapshot().reason || "Panel input is active; wait for the turn to finish" };
+    if (this.ready) this.draftHasInput = scanned.draftHasInput;
     await this.enqueueWrite(data);
     this.changed();
-    return { accepted: true };
+    return takeover ? { accepted: true, control: "takeover" } : { accepted: true };
   }
 
   async panelSend(requestID: string, text: string): Promise<PanelSendResult> {
@@ -220,7 +231,7 @@ export class ManagedInputArbiter {
         ? { status: "indeterminate", request_id: requestID, detail: existing.detail || "Delivery outcome is unknown; automatic resend is unsafe" }
         : { status: "duplicate", request_id: requestID, detail: "Original delivery state: " + existing.state };
     }
-    if (this.owner === "local" || (this.localAttached && this.owner !== "panel")) return { status: "busy", request_id: requestID, detail: "Local Terminal owns input; explicitly hand off or detach first" };
+    if (this.owner === "local" && this.draftHasInput) return { status: "busy", request_id: requestID, detail: "Local Terminal has an unfinished draft; clear or submit it before Panel sends" };
     if (!this.ready || this.busy || this.approvalPending || this.status === "stopped" || this.status === "starting" || this.status === "reconnecting") {
       return { status: "busy", request_id: requestID, detail: this.snapshot().reason || "Claude Code is not ready for Panel input" };
     }
@@ -280,13 +291,40 @@ export class ManagedInputArbiter {
     return { accepted: true, control: "takeover" };
   }
 
-  private trackDraft(data: string): void {
+  private scanLocalInput(data: string): { hasText: boolean; draftHasInput: boolean } {
+    let hasText = false;
+    let draftHasInput = this.draftHasInput;
     for (const character of data) {
-      if (character === CTRL_U) this.draftHasInput = false;
+      if (this.escapeState === "escape") {
+        if (character === "[" || character === "]" || character === "O") {
+          this.escapeState = character === "[" ? "csi" : character === "]" ? "osc" : "ss3";
+          continue;
+        }
+        // Escape is also a standalone Claude key. The next printable byte
+        // belongs to the user's draft, even if it arrives in another packet.
+        this.escapeState = "none";
+      }
+      if (this.escapeState === "csi") {
+        if (character >= "@" && character <= "~") this.escapeState = "none";
+        continue;
+      }
+      if (this.escapeState === "osc") {
+        if (character === "\x07") this.escapeState = "none";
+        else if (character === "\x1b") this.escapeState = "osc_escape";
+        continue;
+      }
+      if (this.escapeState === "osc_escape") {
+        this.escapeState = character === "\\" ? "none" : "osc";
+        continue;
+      }
+      if (this.escapeState === "ss3") { this.escapeState = "none"; continue; }
+      if (character === "\x1b") { this.escapeState = "escape"; continue; }
+      if (character === CTRL_U) draftHasInput = false;
       else if (BACKSPACE.has(character)) { /* Keep non-empty state conservative. */ }
       else if (character === "\r" || character === "\n") { /* Hook confirmation clears the submitted draft. */ }
-      else this.draftHasInput = true;
+      else if (character >= " " || character === "\t") { hasText = true; draftHasInput = true; }
     }
+    return { hasText, draftHasInput };
   }
 
   private enqueueWrite(data: string): Promise<void> {
@@ -295,5 +333,11 @@ export class ManagedInputArbiter {
     return current;
   }
 
-  private changed(): void { this.onStateChanged(this.snapshot()); }
+  private changed(): void {
+    const snapshot = this.snapshot();
+    const signature = JSON.stringify(snapshot);
+    if (signature === this.lastStateSignature) return;
+    this.lastStateSignature = signature;
+    this.onStateChanged(snapshot);
+  }
 }

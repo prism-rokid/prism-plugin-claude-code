@@ -18,6 +18,7 @@ test("managed adapter attaches the exact native supervisor and confirms Panel se
   const dataDir = join(base, sessionID);
   mkdirSync(dataDir);
   const writes: string[] = [];
+  let terminalLaunches = 0;
   const supervisor = new ManagedSupervisor({
     sessionID, cwd: base, cliPath: "claude", helperPath: "attach.js", dataDir,
     platform: "linux", spawner: () => ({
@@ -25,6 +26,7 @@ test("managed adapter attaches the exact native supervisor and confirms Panel se
       onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }),
     }),
     childSpawner: ((_command: string, args: string[]) => {
+      terminalLaunches++;
       rmSync(dirname(args[3]), { recursive: true, force: true });
       return Object.assign(new EventEmitter(), { unref() {} }) as ChildProcess;
     }) as never,
@@ -51,6 +53,8 @@ test("managed adapter attaches the exact native supervisor and confirms Panel se
   assert.equal(await new Promise<number | null>((resolve) => hook.once("exit", resolve)), 0);
   const receipt = await pending;
   assert.equal(receipt.Visible, true);
+  for (let i = 0; i < 100 && terminalLaunches === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(terminalLaunches, 1, "a detached native Terminal should open after a confirmed remote send");
   assert.equal((await adapter.verifyVisibility(native, "message-1")).Visible, true);
   assert.deepEqual(writes, ["\x1b[200~hello\x1b[201~\r"]);
   const permission = spawn(process.execPath, [hookScript, supervisor.descriptorPath], { stdio: ["pipe", "pipe", "pipe"] });
@@ -129,4 +133,60 @@ test("a new plugin subscription receives the same durable Hook event ID after re
   const client = await ManagedSupervisorClient.connect(supervisor.descriptorPath);
   assert.equal(await client.replayHooks(), 0);
   client.close();
+});
+
+test("plugin-wide watcher discovers a manually created managed Terminal and forwards its local prompt", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "prism-managed-wide-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const adapter = new ManagedClaudeAdapter(base);
+  const abort = new AbortController();
+  const stream = adapter.subscribePlugin(abort.signal)[Symbol.asyncIterator]();
+  const firstEvent = stream.next();
+  const sessionID = "550e8400-e29b-41d4-a716-446655440003";
+  const dataDir = join(base, sessionID);
+  mkdirSync(dataDir);
+  const supervisor = new ManagedSupervisor({
+    sessionID, cwd: base, cliPath: "claude", helperPath: "attach.js", dataDir,
+    platform: "linux", spawner: () => ({
+      pid: 4242, write: () => {}, resize: () => {}, kill: () => {},
+      onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }),
+    }),
+  });
+  try {
+    await supervisor.start();
+    const index = await Promise.race([
+      firstEvent,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("new session was not indexed")), 3000)),
+    ]);
+    assert.equal(index.value?.Type, "desktop.session.index.changed");
+    assert.equal((index.value?.Payload.native_session as Record<string, unknown>).native_session_id, sessionID);
+    const hookScript = fileURLToPath(new URL("../managed-hook.js", import.meta.url));
+    const hook = spawn(process.execPath, [hookScript, supervisor.descriptorPath], { stdio: ["pipe", "ignore", "pipe"] });
+    hook.stdin.end(JSON.stringify({ session_id: sessionID, hook_event_name: "UserPromptSubmit", prompt: "from local terminal" }));
+    assert.equal(await new Promise<number | null>((resolve) => hook.once("exit", resolve)), 0);
+    let accepted = false;
+    let titled = false;
+    for (let i = 0; i < 5; i++) {
+      const event = await Promise.race([
+        stream.next(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("local prompt was not forwarded")), 3000)),
+      ]);
+      if (event.value?.Type === "desktop.session.index.changed") {
+        assert.equal((event.value.Payload.session_hint as Record<string, unknown>).title, "from local terminal");
+        titled = true;
+      }
+      if (event.value?.Type !== "message.user.accepted") continue;
+      assert.equal(event.value.Payload.text, "from local terminal");
+      assert.equal((event.value.Payload.native_session as Record<string, unknown>).native_session_id, sessionID);
+      accepted = true;
+      break;
+    }
+    assert.equal(accepted, true);
+    assert.equal(titled, true);
+  } finally {
+    abort.abort();
+    await stream.return?.();
+    await adapter.close();
+    await supervisor.close();
+  }
 });

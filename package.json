@@ -8,6 +8,7 @@
   "scripts": {
     "postinstall": "node scripts/prepare-node-pty.mjs",
     "build": "tsc -p tsconfig.json",
+    "install:shell": "node scripts/install-shell-integration.mjs",
     "test": "npm run build && node --test dist/test/**/*.test.js"
   },
   "dependencies": {

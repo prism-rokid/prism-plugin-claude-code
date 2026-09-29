@@ -10,7 +10,7 @@ import { PersistentDeliveryLedger } from "./managed-input-arbiter.js";
 import { PersistentHookOutbox } from "./managed-hook-outbox.js";
 
 export type SupervisorDescriptor = { version: 1; session_id: string; cwd: string; port: number; token: string; pid: number };
-export type SupervisorRequest = { id: string; method: "snapshot" | "output_tail" | "replay_hooks" | "ack_hook" | "send" | "delivery" | "interrupt" | "approval" | "resolve_approval" | "open_terminal" | "hook" | "shutdown"; request_id?: string; event_id?: string; text?: string; native_session_id?: string; approval_request_id?: string; action_id?: string; payload?: Record<string, unknown> };
+export type SupervisorRequest = { id: string; method: "snapshot" | "output_tail" | "replay_hooks" | "ack_hook" | "send" | "delivery" | "interrupt" | "approval" | "resolve_approval" | "open_terminal" | "terminal_handoff" | "hook" | "shutdown"; request_id?: string; event_id?: string; text?: string; native_session_id?: string; approval_request_id?: string; action_id?: string; payload?: Record<string, unknown> };
 const MAX_PACKET_BYTES = 1024 * 1024;
 type TranscriptRow = { type?: string; timestamp?: string; message?: { content?: unknown } };
 
@@ -146,6 +146,8 @@ export class ManagedSupervisor {
       } else if (request.method === "open_terminal" && typeof request.native_session_id === "string") {
         await this.broker.openManagedTerminal(request.native_session_id);
         payload = { ok: true };
+      } else if (request.method === "terminal_handoff" && typeof request.native_session_id === "string") {
+        payload = this.broker.terminalHandoff(request.native_session_id);
       } else if (request.method === "shutdown") {
         this.write(socket, { id: request.id, ok: true, payload: { ok: true } });
         setImmediate(() => { void this.close(); });

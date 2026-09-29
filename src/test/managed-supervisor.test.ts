@@ -44,6 +44,11 @@ test("supervisor keeps the same PTY while plugin-side controller reconnects", as
     assert.equal(exit, 0);
   }
   await invokeHook({ hook_event_name: "SessionStart" });
+  const handoff = await first.terminalHandoff("native-reconnect");
+  assert.equal(handoff.host, "127.0.0.1");
+  assert.equal(handoff.session_id, "native-reconnect");
+  assert.ok(handoff.port > 0 && handoff.token);
+  await assert.rejects(first.terminalHandoff("another-session"), /managed_session_not_found/);
   assert.equal((await first.send("panel-1", "hello")).status, "accepted");
   first.close(); // Simulate Hub/plugin process exiting; supervisor stays alive.
   assert.equal(kills, 0);

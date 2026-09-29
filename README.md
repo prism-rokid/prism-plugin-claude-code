@@ -23,9 +23,10 @@ remain pending for replay. The receipt confirms server-side processing, not
 delivery to an open Panel or durable storage of the transient notification.
 History remains recoverable from Claude's local transcript. Full end-to-end
 restart acceptance is still outstanding.
-Only one side owns input at a time. In Terminal, `Ctrl-]` switches input
-ownership; an unfinished local draft blocks handoff until it is cleared or
-submitted. Permission requests from Panel-owned turns can be allowed once or
+Only one side owns input at a time. When Claude is idle and the native composer
+has no draft, either Panel send or Terminal typing takes the input lease.
+`Ctrl-]` explicitly switches input ownership; an unfinished local draft blocks
+Panel send until it is cleared or submitted. Permission requests from Panel-owned turns can be allowed once or
 denied in Panel. Local-owned requests stay in Claude's native TUI.
 
 Managed mode remains opt-in while Terminal.app attachment, complete upgrade
@@ -37,6 +38,20 @@ An old SDK conversation is readable while its original process runs. Managed
 mode refuses a second writer to that session. Once the old process exits, the
 next send starts a new managed Claude process with `--resume` and the same
 session ID; it does not attach to the old process in place.
+
+To start future native sessions from Terminal.app or a zsh-based IDE terminal,
+enable the optional shell integration with `npm run install:shell` while the
+plugin is installed in Hub's managed mode. A new interactive shell's plain
+`claude` or `Claude` command then starts one managed Claude PTY and attaches the invoking
+terminal to it; Panel discovers and controls that same process. The managed
+adapter watches for new local supervisors and publishes their session index
+and live events without waiting for Hub's periodic discovery scan. Session
+titles come from Claude's local session metadata and update as Claude names
+the conversation. The
+original Claude executable remains available as `command claude`. Commands with
+arguments and non-interactive invocations still use the original executable,
+so they are not automatically managed. Existing standalone Claude processes
+cannot be retroactively attached to this PTY.
 
 Claude's first interactive visit to a new project requires workspace trust.
 Panel does not auto-accept it: a remote first-message attempt returns

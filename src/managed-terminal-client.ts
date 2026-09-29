@@ -4,20 +4,24 @@ import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-type Handoff = { host: string; port: number; token: string; session_id: string };
+import type { ManagedTerminalHandoff } from "./managed-pty-broker.js";
 type Packet = { type?: string; data?: string; output?: string; reason?: string; owner?: string; exit_code?: number };
 
 export async function runAttachClient(handoffPath: string): Promise<void> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Managed Claude attach requires a native terminal");
-  let handoff: Handoff;
+  let handoff: ManagedTerminalHandoff;
   try {
-    handoff = JSON.parse(readFileSync(handoffPath, "utf8")) as Handoff;
+    handoff = JSON.parse(readFileSync(handoffPath, "utf8")) as ManagedTerminalHandoff;
   } finally {
     // This file carries a one-use local credential. Never leave it behind in
     // a terminal scrollback, command argument or reusable filesystem path.
     try { unlinkSync(handoffPath); } catch { /* already removed */ }
     try { rmdirSync(dirname(handoffPath)); } catch { /* may contain another file */ }
   }
+  await runAttachClientWithHandoff(handoff);
+}
+
+export async function runAttachClientWithHandoff(handoff: ManagedTerminalHandoff): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Managed Claude attach requires a native terminal");
   if (handoff.host !== "127.0.0.1" || !Number.isInteger(handoff.port) || handoff.port < 1 || handoff.port > 65535 || !handoff.token) {
     throw new Error("Invalid managed Claude terminal handoff");
   }
@@ -25,6 +29,7 @@ export async function runAttachClient(handoffPath: string): Promise<void> {
   let buffer = Buffer.alloc(0);
   let ready = false;
   let finished = false;
+  let lastRejection = "";
   const rawBefore = process.stdin.isRaw;
   const cleanup = () => {
     if (finished) return;
@@ -60,13 +65,14 @@ export async function runAttachClient(handoffPath: string): Promise<void> {
         process.stdin.on("data", forwardInput);
         process.stdout.on("resize", resize);
         resize();
-        process.stderr.write(`\r\nPrism Claude session ${handoff.session_id} attached. Ctrl-] switches input ownership.\r\n`);
       } else if (packet.type === "output" && typeof packet.data === "string") {
         process.stdout.write(Buffer.from(packet.data, "base64"));
       } else if (packet.type === "input_rejected") {
-        process.stderr.write(`\r\nPrism: ${packet.reason || "input lease unavailable"}\r\n`);
+        const reason = packet.reason || "input lease unavailable";
+        if (reason !== lastRejection) process.stderr.write(`\r\nPrism: ${reason}\r\n`);
+        lastRejection = reason;
       } else if (packet.type === "lease") {
-        process.stderr.write(`\r\nPrism input owner: ${packet.owner || "none"}\r\n`);
+        lastRejection = "";
       } else if (packet.type === "stopped") {
         process.stderr.write(`\r\nClaude Code exited (${packet.exit_code ?? "unknown"}).\r\n`);
         socket.end();

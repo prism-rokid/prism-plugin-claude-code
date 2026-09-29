@@ -27,6 +27,22 @@ test("local attachment owns stdin and blocks Panel without changing the draft", 
   assert.equal(h.arbiter.snapshot().input_owner, "local");
 });
 
+test("an idle attached Terminal and Panel alternate without closing the native window", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  h.arbiter.attachLocal();
+  assert.equal(h.arbiter.snapshot().can_send, true);
+  assert.equal((await h.arbiter.panelSend("remote-after-local-idle", "remote")).status, "accepted");
+  assert.equal(h.arbiter.snapshot().input_owner, "panel");
+  h.arbiter.promptSubmitted("remote", "prompt-remote");
+  h.arbiter.turnCompleted("prompt-remote");
+  assert.deepEqual(await h.arbiter.localInput("native draft"), { accepted: true, control: "takeover" });
+  assert.equal(h.arbiter.snapshot().can_send, false);
+  await h.arbiter.localInput("\x15");
+  assert.equal(h.arbiter.snapshot().can_send, true);
+  assert.equal((await h.arbiter.panelSend("remote-after-clear", "remote again")).status, "accepted");
+});
+
 test("failed Claude stop remains failed in the durable delivery ledger", async (t) => {
   const h = harness();
   t.after(h.close);
@@ -107,6 +123,84 @@ test("Panel messages are serialized and local key bytes cannot enter while Panel
   assert.equal(dropped.accepted, false);
   assert.equal(h.writes.length, 2);
   assert.equal(h.arbiter.snapshot().input_owner, "panel");
+});
+
+test("native Terminal auto-attachment stays read-only after a detached Panel send", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  assert.equal((await h.arbiter.panelSend("remote-attach", "continue")).status, "accepted");
+  const attachment = h.arbiter.attachLocal();
+  assert.deepEqual(attachment, { readOnly: true, owner: "panel" });
+  assert.equal((await h.arbiter.localInput("local keys")).accepted, false);
+  assert.deepEqual(h.writes, ["\x1b[200~continue\x1b[201~\r"]);
+});
+
+test("first local keystroke after a Panel turn takes the lease and blocks later Panel sends", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  assert.equal((await h.arbiter.panelSend("remote-then-local", "continue")).status, "accepted");
+  h.arbiter.attachLocal();
+  assert.equal((await h.arbiter.localInput("too early")).accepted, false);
+  h.arbiter.promptSubmitted("continue", "prompt-1");
+  h.arbiter.turnCompleted("prompt-1");
+  assert.deepEqual(await h.arbiter.localInput("local draft"), { accepted: true, control: "takeover" });
+  assert.equal(h.arbiter.snapshot().input_owner, "local");
+  assert.equal((await h.arbiter.panelSend("must-wait", "remote text")).status, "busy");
+  assert.deepEqual(h.writes, ["\x1b[200~continue\x1b[201~\r", "local draft"]);
+});
+
+test("typing within the same local draft does not publish duplicate terminal states", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  const states: string[] = [];
+  const arbiter = new ManagedInputArbiter({ write: (data) => h.writes.push(data) }, h.ledger, (state) => states.push(JSON.stringify(state)));
+  arbiter.setStarted();
+  arbiter.attachLocal();
+  await arbiter.localInput("hello");
+  const published = states.length;
+  await arbiter.localInput(" world");
+  assert.equal(states.length, published);
+  assert.deepEqual(h.writes, ["hello", " world"]);
+});
+
+test("terminal navigation and focus escapes do not strand a phantom local draft", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  h.arbiter.attachLocal();
+  await h.arbiter.localInput("\x1b");
+  await h.arbiter.localInput("[A\x1b[I\x1b[O");
+  h.arbiter.detachLocal();
+  assert.equal(h.arbiter.snapshot().input_owner, null);
+  assert.equal(h.arbiter.snapshot().can_send, true);
+  assert.deepEqual(h.writes, ["\x1b", "[A\x1b[I\x1b[O"]);
+});
+
+test("terminal control traffic does not silently take the lease from Panel after a turn", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  assert.equal((await h.arbiter.panelSend("panel-keeps-lease", "hello")).status, "accepted");
+  h.arbiter.attachLocal();
+  h.arbiter.promptSubmitted("hello", "prompt-1");
+  h.arbiter.turnCompleted("prompt-1");
+  assert.equal((await h.arbiter.localInput("\x1b")).accepted, false);
+  assert.equal((await h.arbiter.localInput("[I\x1b[O")).accepted, false);
+  assert.equal(h.arbiter.snapshot().input_owner, "panel");
+  assert.equal(h.arbiter.snapshot().can_send, true);
+  assert.deepEqual(await h.arbiter.localInput("local text"), { accepted: true, control: "takeover" });
+  assert.equal(h.arbiter.snapshot().input_owner, "local");
+  assert.deepEqual(h.writes, ["\x1b[200~hello\x1b[201~\r", "local text"]);
+});
+
+test("a standalone Escape does not swallow the first typed draft character", async (t) => {
+  const h = harness();
+  t.after(h.close);
+  assert.equal((await h.arbiter.panelSend("panel-before-escape", "hello")).status, "accepted");
+  h.arbiter.attachLocal();
+  h.arbiter.promptSubmitted("hello", "prompt-escape");
+  h.arbiter.turnCompleted("prompt-escape");
+  assert.equal((await h.arbiter.localInput("\x1b")).accepted, false);
+  assert.deepEqual(await h.arbiter.localInput("first character"), { accepted: true, control: "takeover" });
+  assert.deepEqual(h.writes, ["\x1b[200~hello\x1b[201~\r", "first character"]);
 });
 
 test("same request id is idempotent; changed text conflicts; crash recovery is indeterminate", async (t) => {

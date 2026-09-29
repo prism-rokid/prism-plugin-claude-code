@@ -44,7 +44,7 @@ export type ManagedPtyBrokerOptions = {
   resumeSession?: boolean;
 };
 
-type Handoff = { host: string; port: number; token: string; session_id: string };
+export type ManagedTerminalHandoff = { host: string; port: number; token: string; session_id: string };
 
 function safeSessionID(value: string): string {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid Claude native session ID");
@@ -136,13 +136,8 @@ export class ManagedPtyBroker {
 
   /** Only attach to this in-memory managed PTY. Missing sessions fail closed. */
   async openManagedTerminal(nativeSessionID: string): Promise<void> {
-    if (safeSessionID(nativeSessionID) !== this.sessionID) throw new Error("managed_session_not_found");
-    if (this.status === "stopped") throw new Error("managed_session_not_found");
-    if (this.client && !this.client.destroyed) throw new Error("local_terminal_already_attached");
-    if (this.attachWaiter) throw new Error("local_terminal_launch_pending");
-    if (!this.server || !this.server.address() || typeof this.server.address() === "string") throw new Error("managed_session_not_found");
-    const address = this.server.address() as { port: number };
-    const handoff = this.createHandoff({ host: "127.0.0.1", port: address.port, token: this.token, session_id: this.sessionID });
+    const connection = this.terminalHandoff(nativeSessionID);
+    const handoff = this.createHandoff(connection);
     let rejectAttach!: (error: Error) => void;
     const attached = new Promise<void>((resolve, reject) => {
       rejectAttach = reject;
@@ -157,8 +152,6 @@ export class ManagedPtyBroker {
       confirmed = true;
     } catch (error) {
       if (!launcher) {
-        // A synchronous spawn failure otherwise leaves the attach promise
-        // rejected without an observer.
         rejectAttach(error instanceof Error ? error : new Error(String(error)));
         await attached.catch(() => {});
       }
@@ -167,11 +160,20 @@ export class ManagedPtyBroker {
       clearTimeout(timeout);
       this.attachWaiter = undefined;
       if (!confirmed && typeof launcher?.kill === "function") launcher.kill();
-      // The helper consumes this one-use credential before authenticating.
-      // Also clean up failed launches that never started the helper.
       try { rmSync(handoff, { force: true }); } catch {}
       try { rmSync(dirname(handoff), { recursive: true, force: true }); } catch {}
     }
+  }
+
+  /** Authenticated callers can attach their already-open native Terminal. */
+  terminalHandoff(nativeSessionID: string): ManagedTerminalHandoff {
+    if (safeSessionID(nativeSessionID) !== this.sessionID) throw new Error("managed_session_not_found");
+    if (this.status === "stopped") throw new Error("managed_session_not_found");
+    if (this.client && !this.client.destroyed) throw new Error("local_terminal_already_attached");
+    if (this.attachWaiter) throw new Error("local_terminal_launch_pending");
+    if (!this.server || !this.server.address() || typeof this.server.address() === "string") throw new Error("managed_session_not_found");
+    const address = this.server.address() as { port: number };
+    return { host: "127.0.0.1", port: address.port, token: this.token, session_id: this.sessionID };
   }
 
   async close(): Promise<void> {
@@ -242,7 +244,7 @@ export class ManagedPtyBroker {
     this.input.detachLocal();
   }
 
-  private createHandoff(value: Handoff): string {
+  private createHandoff(value: ManagedTerminalHandoff): string {
     const dir = mkdtempSync(join(tmpdir(), "prism-claude-attach-"));
     try { chmodSync(dir, 0o700); } catch {}
     const file = join(dir, "connection.json");

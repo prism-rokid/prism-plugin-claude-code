@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { readSupervisorDescriptor, type SupervisorDescriptor } from "./managed-supervisor.js";
 import type { DeliveryRecord, PanelSendResult, TerminalSnapshot } from "./managed-input-arbiter.js";
+import type { ManagedTerminalHandoff } from "./managed-pty-broker.js";
 
 export class ManagedSupervisorClient {
   private readonly pending = new Map<string, { resolve(value: unknown): void; reject(reason: Error): void }>();
@@ -47,6 +48,7 @@ export class ManagedSupervisorClient {
   async approval(): Promise<Record<string, unknown> | null> { return await this.call<Record<string, unknown> | null>({ method: "approval" }); }
   async resolveApproval(approvalRequestID: string, actionID: string): Promise<void> { await this.call({ method: "resolve_approval", approval_request_id: approvalRequestID, action_id: actionID }); }
   async openTerminal(nativeSessionID: string): Promise<void> { await this.call({ method: "open_terminal", native_session_id: nativeSessionID }); }
+  async terminalHandoff(nativeSessionID: string): Promise<ManagedTerminalHandoff> { return await this.call<ManagedTerminalHandoff>({ method: "terminal_handoff", native_session_id: nativeSessionID }); }
   async shutdown(): Promise<void> { await this.call({ method: "shutdown" }); }
   close(): void { this.socket.destroy(); this.failAll(new Error("Claude supervisor client closed")); }
 
