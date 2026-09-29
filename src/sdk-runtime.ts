@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
+  getSessionInfo,
   getSessionMessages,
   listSessions,
   query,
@@ -300,6 +301,19 @@ export class ClaudeSdkRuntime implements SdkClient {
     return summaries;
   }
 
+  async sessionInfo(sessionId: string): Promise<SdkSessionSummary | undefined> {
+    const info = await getSessionInfo(sessionId);
+    if (!info) return undefined;
+    const existing = this.slots.get(info.sessionId);
+    if (existing) existing.fresh = false;
+    return {
+      sessionId: info.sessionId,
+      title: info.customTitle || info.summary || info.firstPrompt || "Claude Code session",
+      cwd: info.cwd ?? existing?.cwd ?? "",
+      updatedAt: new Date(info.lastModified || Date.now()).toISOString(),
+    };
+  }
+
   async readTranscript(sessionId: string): Promise<SdkTranscriptEntry[]> {
     const messages = await getSessionMessages(sessionId, { limit: 2000 });
     if (this.slots.has(sessionId)) this.slots.get(sessionId)!.fresh = false;
@@ -315,7 +329,7 @@ export class ClaudeSdkRuntime implements SdkClient {
         }
         const text = blocks.filter((block) => block.type === "text").map(blockText).join("\n").trim();
         if (!text) continue;
-        entries.push({ uuid: row.uuid, role: "user", text, toolUses: [], timestamp: undefined });
+        entries.push({ uuid: row.uuid, role: "user", text, toolUses: [], timestamp: typeof (row as unknown as { timestamp?: unknown }).timestamp === "string" ? (row as unknown as { timestamp: string }).timestamp : undefined });
         continue;
       }
       const toolUses: SdkTranscriptToolUse[] = [];
@@ -327,7 +341,7 @@ export class ClaudeSdkRuntime implements SdkClient {
         }
       }
       if (!text && toolUses.length === 0) continue;
-      entries.push({ uuid: row.uuid, role: "assistant", text, toolUses, timestamp: undefined });
+      entries.push({ uuid: row.uuid, role: "assistant", text, toolUses, timestamp: typeof (row as unknown as { timestamp?: unknown }).timestamp === "string" ? (row as unknown as { timestamp: string }).timestamp : undefined });
     }
     for (const entry of entries) {
       for (const tool of entry.toolUses) {

@@ -58,6 +58,8 @@ jobs:
         run: node scripts/verify-release.mjs
       - name: Protocol probe on the target runner
         run: node scripts/probe.mjs
+      - name: Native PTY probe on the target runner
+        run: node scripts/probe-pty.mjs
       - name: Keep only runtime dependencies
         run: npm prune --omit=dev
       - name: Stage target package

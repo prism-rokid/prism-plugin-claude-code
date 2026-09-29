@@ -1,59 +1,60 @@
-# Claude Code plugin (Claude Agent SDK)
+# Claude Code plugin for Prism
 
-This is Prism Hub's protocol-native Claude Code adapter. Since 0.2.0 it talks
-to Claude Code directly through the official `@anthropic-ai/claude-agent-sdk`
-(pinned `0.3.263`) instead of the previous ACP double-hop. The earlier design
-launched `@agentclientprotocol/claude-agent-acp` as a child process and spoke
-ACP over a private stdio channel; that whole protocol layer is gone. Its own
-stdin/stdout remains reserved for PluginBridge, so it never uses Codex CDP or
-browser automation.
+This plugin has two runtime modes. `sdk` is the existing default: it uses the
+Claude Agent SDK to create and resume SDK-owned Claude processes. `managed` is
+the in-progress native Terminal mode: a detached local supervisor owns one
+Claude CLI process and one PTY per session. The computer's Terminal app and
+Prism Panel attach to that same running instance through one input arbiter.
 
-Current behavior:
+Managed mode accepts the user's local Claude configuration, including custom
+API endpoints and API-key based access. It does not depend on Claude Channels,
+Remote Control or a claude.ai subscription. PluginBridge stdio remains separate
+from the Claude PTY and is never used as a terminal.
 
-- one streaming-input `query()` process per active Claude session; idle
-  streams are reaped after 5 minutes and transparently resumed on the next
-  message
-- session enumeration, transcript reads, and session info use the SDK's local
-  store APIs (`listSessions`, `getSessionMessages`) — no subprocess involved
-- drafts are pure plugin state: the session UUID is pre-generated at
-  `openDraft`, model / effort / permission selections are recorded as pending
-  options, and the CLI process only starts at `startDraftWithMessage`
-- model, reasoning effort, and permission mode are applied both as spawn
-  options and as live control requests (`setModel`, `applyFlagSettings`,
-  `setPermissionMode`); the model list comes from the live session's
-  `supportedModels` (with a static fallback)
-- permission requests arrive through `canUseTool` and surface as standard
-  `approval.required` events with `allow_once` / `allow_always` (when the SDK
-  supplies permission suggestions) / `reject_once` actions
-- partial-message streaming (`includePartialMessages`) drives live preview,
-  thinking progress, and per-chunk assistant deltas; each completed assistant
-  message is then committed under its stable transcript UUID
-- attachments: images are inlined as base64 content blocks, other local files
-  are referenced by path in a text line Claude Code can open with its own
-  tools
+The managed supervisor survives Plugin/Hub control-connection restarts. It
+records remote message IDs and delivery stages, confirms submission through
+Claude Hooks, and reconciles displayed history from Claude's local transcript.
+It durably records minimal Hook markers before broadcast and replays them to a
+new plugin subscription with stable event IDs. The Hub suppresses duplicate
+native event IDs after replay. Hub waits for a matching Realtime server receipt
+after the server processes the conversation event, then acknowledges the plugin
+and the supervisor deletes its outbox file. Failed writes and missing receipts
+remain pending for replay. The receipt confirms server-side processing, not
+delivery to an open Panel or durable storage of the transient notification.
+History remains recoverable from Claude's local transcript. Full end-to-end
+restart acceptance is still outstanding.
+Only one side owns input at a time. In Terminal, `Ctrl-]` switches input
+ownership; an unfinished local draft blocks handoff until it is cleared or
+submitted. Permission requests from Panel-owned turns can be allowed once or
+denied in Panel. Local-owned requests stay in Claude's native TUI.
 
-The plugin bundles Claude Code through the SDK's platform packages, so it no
-longer searches the user's shell PATH for a `claude` binary and no longer
-depends on nvm/zsh discovery. Set `CLAUDE_CODE_EXECUTABLE` only to force a
-specific Claude Code executable; it is validated at probe time. Login state is
-still the machine's own `~/.claude`.
+Managed mode remains opt-in while Terminal.app attachment, complete upgrade
+and restart recovery, and all release targets complete acceptance. It
+currently rejects attachments rather than silently dropping them. The SDK mode
+remains available for existing installations.
 
-Production packages run with Prism's shared Node 22 runtime and depend on the
-published `@prism-rokid/pluginbridge-plugin-sdk`; the SDK is not copied into a
-plugin archive.
+An old SDK conversation is readable while its original process runs. Managed
+mode refuses a second writer to that session. Once the old process exits, the
+next send starts a new managed Claude process with `--resume` and the same
+session ID; it does not attach to the old process in place.
 
-For standalone development:
+Claude's first interactive visit to a new project requires workspace trust.
+Panel does not auto-accept it: a remote first-message attempt returns
+`workspace_trust_required` without submitting text or leaving a running orphan.
+Open the project from the local Dashboard's managed Terminal action, accept
+the native prompt, then retry the Panel message.
+
+For local development:
 
 ```bash
 npm ci --registry=https://registry.npmmirror.com
 npm test
-node dist/index.js
+PRISM_PLUGIN_MODE=managed node dist/index.js
 ```
 
-Run `adapter.probe` first. It verifies the SDK's session store is readable
-(and that an explicit executable override, if any, exists) without creating a
-Claude session or sending a model prompt.
-
-Packaging note: the SDK ships per-platform CLI binaries via optional
-dependencies (`@anthropic-ai/claude-agent-sdk-<platform>`); install on the
-target platform so the right variant is present.
+The release build uses Node 22 and includes a fixed PluginBridge SDK 0.1.3
+package under `vendor/` until that SDK version is published independently.
+`npm ci` runs `scripts/prepare-node-pty.mjs` to ensure the macOS PTY helper is
+executable; release CI also spawns a real PTY on every target runner. Build
+artifacts must be assembled on their target platform so `node-pty` and the
+Claude Agent SDK's platform packages match that platform.

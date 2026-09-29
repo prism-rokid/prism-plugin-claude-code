@@ -1,7 +1,7 @@
 id: claudecode
 schema_version: 1
 display_name: Claude Code
-description: Runs local Claude Code through the Claude Agent SDK for Prism remote conversations.
+description: Connects Prism conversations to Claude Code through SDK or a managed native Terminal.
 icon_url: https://registry.npmmirror.com/@lobehub/icons-static-avatar/latest/files/avatars/claudecode.webp
 icon_svg_url: https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons/claudecode.svg
 version: 0.2.1
@@ -9,12 +9,19 @@ plugin_protocol_version: "4"
 min_hub_version: 0.1.0
 integration_mode: protocol-native
 transport: process
-runtime_modes: [sdk]
+runtime_modes: [sdk, managed]
 default_runtime_mode: sdk
+managed_terminal_modes: [managed]
 runtime_controls:
   sdk: {}
+  managed: {}
 runtime_operations:
   sdk:
+    rename: unsupported
+    pin: unsupported
+    archive: unsupported
+    delete: unsupported
+  managed:
     rename: unsupported
     pin: unsupported
     archive: unsupported
@@ -39,3 +46,4 @@ capabilities:
   can_wait_run: true
   can_read_status: true
   can_control_session: true
+  can_open_managed_terminal: true

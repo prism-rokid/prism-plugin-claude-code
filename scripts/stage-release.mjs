@@ -12,7 +12,7 @@ if (!platform || !id || !version) throw new Error("release platform, id and vers
 const destination = resolve(root, "release", `${id}-${version}-${platform}`);
 await rm(destination, { recursive: true, force: true });
 await mkdir(destination, { recursive: true });
-const skip = new Set([".git", ".github", "release", "scripts", "test", "src", ".DS_Store", ".npmrc", ".gitignore"]);
+const skip = new Set([".git", ".github", "release", "test", "src", ".DS_Store", ".npmrc", ".gitignore"]);
 for (const entry of await readdir(root)) {
   if (!skip.has(entry)) await cp(resolve(root, entry), resolve(destination, entry), { recursive: true });
 }
