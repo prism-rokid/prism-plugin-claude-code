@@ -21,7 +21,7 @@ test("native attach preserves terminal input bytes through the PTY lifecycle bro
   };
   const broker = new ManagedPtyBroker({
     sessionID: "native-1", cwd: dir, cliPath: "claude", helperPath: "attach.js", dataDir: dir,
-    platform: "linux", attachTimeoutMs: 30,
+    platform: "linux", attachTimeoutMs: 2000,
     spawner: () => { spawned++; return pty; },
     childSpawner: ((_command: string, args: string[]) => {
       handoffFile = args[3];
