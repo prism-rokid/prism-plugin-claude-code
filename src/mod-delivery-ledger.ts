@@ -62,7 +62,7 @@ export class PersistentDeliveryLedger {
     const folder = dirname(this.filePath);
     const temporary = join(folder, `.mod-ledger-${process.pid}-${Date.now()}.tmp`);
     writeFileSync(temporary, JSON.stringify([...this.records.values()]) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    const fd = openSync(temporary, "r");
+    const fd = openSync(temporary, "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
     renameSync(temporary, this.filePath);
     try { const dir = openSync(folder, "r"); try { fsyncSync(dir); } finally { closeSync(dir); } } catch { /* Unsupported on some platforms. */ }

@@ -42,7 +42,7 @@ export class ManagedSupervisor {
     const descriptor: SupervisorDescriptor = { version: 1, session_id: this.broker.sessionID, cwd: this.broker.cwd, port: address.port, token: this.token, pid: process.pid };
     const temporary = join(this.options.dataDir, `.supervisor-${process.pid}.tmp`);
     writeFileSync(temporary, JSON.stringify(descriptor), { mode: 0o600, flag: "wx" });
-    const fd = openSync(temporary, "r");
+    const fd = openSync(temporary, "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
     renameSync(temporary, this.descriptorPath);
     try { this.broker.launch(); }
