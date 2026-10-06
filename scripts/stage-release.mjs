@@ -12,9 +12,17 @@ if (!platform || !id || !version) throw new Error("release platform, id and vers
 const destination = resolve(root, "release", `${id}-${version}-${platform}`);
 await rm(destination, { recursive: true, force: true });
 await mkdir(destination, { recursive: true });
-const skip = new Set([".git", ".github", "release", "test", "src", ".DS_Store", ".npmrc", ".gitignore"]);
+const runtimeEntries = new Set(["dist", "mod", "scripts", "node_modules", "vendor", "package.json", "package-lock.json", "pluginbridge-plugin.yaml", "README.md", "LICENSE"]);
+const runtimeScripts = new Set(["install-mod.mjs", "prepare-node-pty.mjs"]);
+function includeRuntime(path) {
+  const parts = relative(root, path).split(/[\\/]/);
+  if (parts[0] === "dist" && parts[1] === "test") return false;
+  if (parts[0] === "mod" && parts[1] === ".claude-plugin" && parts[2] === "types") return false;
+  if (parts[0] === "scripts" && parts.length > 1 && !runtimeScripts.has(parts[1])) return false;
+  return true;
+}
 for (const entry of await readdir(root)) {
-  if (!skip.has(entry)) await cp(resolve(root, entry), resolve(destination, entry), { recursive: true });
+  if (runtimeEntries.has(entry)) await cp(resolve(root, entry), resolve(destination, entry), { recursive: true, filter: includeRuntime });
 }
 
 // npm creates node_modules/.bin shims as absolute symlinks that resolve

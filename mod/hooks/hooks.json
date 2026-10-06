@@ -1,0 +1,18 @@
+{
+  "description": "Local Prism controls for native Claude Code sessions",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/permission-request.mjs\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  },
+  "modules": ["./register.js"]
+}

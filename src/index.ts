@@ -1,9 +1,8 @@
 import { serve, checkProtocolVersion } from "@rokid-prism/pluginbridge-plugin-sdk";
-import { ClaudeCodeAdapter } from "./adapter.js";
-import { ManagedClaudeAdapter } from "./managed-adapter.js";
+import { ModClaudeAdapter } from "./mod-adapter.js";
 
 checkProtocolVersion();
-const adapter = process.env.PRISM_PLUGIN_MODE === "managed" ? new ManagedClaudeAdapter() : new ClaudeCodeAdapter();
+const adapter = new ModClaudeAdapter();
 
 serve(adapter)
   .then(() => adapter.close())

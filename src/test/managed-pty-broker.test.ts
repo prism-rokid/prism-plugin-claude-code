@@ -7,21 +7,21 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
 import { ManagedPtyBroker, type ManagedPtyProcess } from "../managed-pty-broker.js";
-import { PersistentDeliveryLedger } from "../managed-input-arbiter.js";
 
-test("native attach and Panel share one broker and cannot merge a detached local draft", async (t) => {
+test("native attach preserves terminal input bytes through the PTY lifecycle broker", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "prism-broker-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const writes: string[] = [];
   let spawned = 0;
   let handoffFile = "";
+  const exitListeners = new Set<(event: { exitCode: number; signal?: number }) => void>();
   const pty: ManagedPtyProcess = {
-    pid: 4242, write: (value) => { writes.push(value); }, resize: () => {}, kill: () => {},
-    onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }),
+    pid: 4242, write: (value) => { writes.push(value); }, resize: () => {}, kill: () => { for (const listener of exitListeners) listener({ exitCode: 0 }); },
+    onData: () => ({ dispose() {} }), onExit: (listener) => { exitListeners.add(listener); return { dispose: () => exitListeners.delete(listener) }; },
   };
   const broker = new ManagedPtyBroker({
     sessionID: "native-1", cwd: dir, cliPath: "claude", helperPath: "attach.js", dataDir: dir,
-    ledger: new PersistentDeliveryLedger(join(dir, "ledger.json")), platform: "linux", attachTimeoutMs: 30,
+    platform: "linux", attachTimeoutMs: 30,
     spawner: () => { spawned++; return pty; },
     childSpawner: ((_command: string, args: string[]) => {
       handoffFile = args[3];
@@ -41,10 +41,8 @@ test("native attach and Panel share one broker and cannot merge a detached local
   await opening;
   socket.write(JSON.stringify({ type: "input", data: Buffer.from("unfinished draft").toString("base64") }) + "\n");
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal((await broker.sendPanel("panel-1", "remote prompt")).status, "busy");
   socket.destroy();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal((await broker.sendPanel("panel-1", "remote prompt")).status, "busy");
   assert.deepEqual(writes, ["unfinished draft"]);
   await assert.rejects(broker.openManagedTerminal("native-1"), /native_terminal_attach_timeout/);
   assert.equal(spawned, 1);

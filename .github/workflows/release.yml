@@ -43,34 +43,16 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
-      - name: Require a reproducible SDK lockfile
+      - name: Require a reproducible lockfile
         shell: bash
         run: test -f package-lock.json
       - name: Install locked dependencies
         run: npm ci
       - name: Build
         run: npm run build --if-present
-      - name: Test full suites on Linux and Apple silicon
-        if: matrix.target == 'linux-x64' || matrix.target == 'macos-arm64'
-        run: |
-          npm test
-      - name: Test non-PTY suites on Intel macOS
-        if: matrix.target == 'macos-x64'
-        run: >-
-          node --test
-          dist/test/adapter.test.js
-          dist/test/claude-session-ownership.test.js
-          dist/test/managed-adapter.test.js
-          dist/test/managed-hook-outbox.test.js
-          dist/test/managed-input-arbiter.test.js
-          dist/test/managed-pty-broker.test.js
-          dist/test/managed-supervisor.test.js
-      - name: Test adapter suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/adapter.test.js
-      - name: Test Claude session ownership suite on Windows
-        if: matrix.target == 'windows-x64'
-        run: node --test dist/test/claude-session-ownership.test.js
+      - name: Test compiled suites
+        shell: bash
+        run: node --test dist/test/*.test.js
       - name: Verify manifest and release version
         shell: bash
         run: node scripts/verify-release.mjs

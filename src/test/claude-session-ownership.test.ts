@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { activeClaudeSessionPID } from "../claude-session-ownership.js";
+import { activeClaudeSessionPID, claudeSessionOwner } from "../claude-session-ownership.js";
 
 test("legacy migration refuses a session with a live Claude registry owner", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "prism-claude-ownership-"));
@@ -13,4 +13,8 @@ test("legacy migration refuses a session with a live Claude registry owner", (t)
   assert.equal(activeClaudeSessionPID("session-live", dir), process.pid);
   assert.equal(activeClaudeSessionPID("session-stale", dir), null);
   assert.equal(activeClaudeSessionPID("unknown", dir), null);
+  assert.deepEqual(claudeSessionOwner("session-live", dir), { state: "active", pid: process.pid });
+  assert.deepEqual(claudeSessionOwner("session-stale", dir), { state: "inactive" });
+  assert.deepEqual(claudeSessionOwner("unknown", dir), { state: "inactive" });
+  assert.deepEqual(claudeSessionOwner("unknown", join(dir, "missing")), { state: "unknown" });
 });

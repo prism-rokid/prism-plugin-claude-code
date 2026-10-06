@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ManagedTerminalHandoff } from "./managed-pty-broker.js";
-type Packet = { type?: string; data?: string; output?: string; reason?: string; owner?: string; exit_code?: number };
+type Packet = { type?: string; data?: string; output?: string; reason?: string; exit_code?: number };
 
 export async function runAttachClient(handoffPath: string): Promise<void> {
   let handoff: ManagedTerminalHandoff;
@@ -68,11 +68,9 @@ export async function runAttachClientWithHandoff(handoff: ManagedTerminalHandoff
       } else if (packet.type === "output" && typeof packet.data === "string") {
         process.stdout.write(Buffer.from(packet.data, "base64"));
       } else if (packet.type === "input_rejected") {
-        const reason = packet.reason || "input lease unavailable";
+        const reason = packet.reason || "Claude CLI is unavailable";
         if (reason !== lastRejection) process.stderr.write(`\r\nPrism: ${reason}\r\n`);
         lastRejection = reason;
-      } else if (packet.type === "lease") {
-        lastRejection = "";
       } else if (packet.type === "stopped") {
         process.stderr.write(`\r\nClaude Code exited (${packet.exit_code ?? "unknown"}).\r\n`);
         socket.end();

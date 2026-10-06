@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { ManagedSupervisorClient } from "./managed-supervisor-client.js";
-import type { TerminalSnapshot } from "./managed-input-arbiter.js";
+import type { TerminalSnapshot } from "./native-terminal-state.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -64,9 +64,18 @@ export class ManagedSupervisorManager {
   }
 
   hasManagedState(sessionID: string): boolean { return existsSync(this.sessionDir(sessionID)); }
+  hasSupervisorOwner(sessionID: string): boolean { return existsSync(join(this.sessionDir(sessionID), "supervisor.json")); }
+  hasSafelyClosedState(sessionID: string): boolean { const dir = this.sessionDir(sessionID); return !existsSync(join(dir, "supervisor.json")) && existsSync(join(dir, "closed.json")); }
+  hasUncertainManagedState(sessionID: string): boolean { return this.hasManagedState(sessionID) && !this.hasSupervisorOwner(sessionID) && !this.hasSafelyClosedState(sessionID); }
 
   private async startSupervisor(sessionID: string, cwd: string, resume: boolean): Promise<{ sessionID: string; client: ManagedSupervisorClient }> {
     const dataDir = this.sessionDir(sessionID);
+    if (existsSync(dataDir)) {
+      if (!resume || !this.hasSafelyClosedState(sessionID)) throw new Error("managed_session_owner_uncertain");
+      this.clients.get(sessionID)?.close();
+      this.clients.delete(sessionID);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
     mkdirSync(dataDir, { recursive: false, mode: 0o700 });
     const supervisor = fileURLToPath(new URL("./managed-supervisor.js", import.meta.url));
     const helper = fileURLToPath(new URL("./managed-terminal-client.js", import.meta.url));

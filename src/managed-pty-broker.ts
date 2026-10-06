@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn as spawnChild, type ChildProcess } from "node:child_process";
 import { spawn as spawnPty, type IPty } from "node-pty";
-import type { ManagedInputArbiter, ManagedTerminalStatus, PersistentDeliveryLedger, TerminalSnapshot } from "./managed-input-arbiter.js";
-import { ManagedInputArbiter as InputArbiter } from "./managed-input-arbiter.js";
+import type { NativeTerminalStatus, TerminalSnapshot } from "./native-terminal-state.js";
+import { NativeTerminalState } from "./native-terminal-state.js";
 
 const MAX_LINE_BYTES = 1024 * 1024;
 
@@ -31,15 +31,12 @@ export type ManagedPtyBrokerOptions = {
   cliPath: string;
   helperPath: string;
   dataDir: string;
-  ledger: PersistentDeliveryLedger;
   onStateChanged?: (snapshot: TerminalSnapshot) => void;
   onOutput?: (data: string) => void;
   spawner?: ManagedPtySpawner;
   childSpawner?: typeof spawnChild;
   platform?: NodeJS.Platform;
   executablePath?: string;
-  hookSettingsPath?: string;
-  startReady?: boolean;
   attachTimeoutMs?: number;
   resumeSession?: boolean;
 };
@@ -58,18 +55,19 @@ function writePacket(socket: Socket, value: Record<string, unknown>): void {
 /**
  * Owns the PTY master for one Claude CLI process. The native Terminal helper
  * only receives an authenticated loopback byte stream; it never attaches to
- * the PTY directly. Panel and local input therefore pass through one arbiter.
+ * the PTY directly. Remote prompts use the Mod bridge; native keystrokes pass
+ * through this byte stream unchanged.
  */
 export class ManagedPtyBroker {
   readonly sessionID: string;
   readonly cwd: string;
   pty!: ManagedPtyProcess;
-  readonly input: ManagedInputArbiter;
+  readonly terminalState: NativeTerminalState;
   private server?: Server;
   private client?: Socket;
   private token = randomBytes(32).toString("base64url");
   private lineBuffers = new WeakMap<Socket, Buffer>();
-  private status: ManagedTerminalStatus = "starting";
+  private status: NativeTerminalStatus = "starting";
   private outputTail = "";
   private ptyDataSubscription?: { dispose(): void };
   private ptyExitSubscription?: { dispose(): void };
@@ -85,7 +83,7 @@ export class ManagedPtyBroker {
     this.childSpawner = options.childSpawner ?? spawnChild;
     this.executablePath = options.executablePath ?? process.execPath;
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
-    this.input = new InputArbiter({ write: (data) => this.pty.write(data) }, options.ledger, (snapshot) => {
+    this.terminalState = new NativeTerminalState((snapshot) => {
       this.status = snapshot.status;
       options.onStateChanged?.({ ...snapshot, status: this.status });
     });
@@ -96,25 +94,25 @@ export class ManagedPtyBroker {
     const spawner = this.options.spawner ?? ((command, args, opts) => spawnPty(command, args, opts) as IPty);
     // A stable session ID is explicit. We never use --resume here: an attach
     // request must only connect to an already-owned PTY broker.
-    this.pty = spawner(this.options.cliPath, [this.options.resumeSession ? "--resume" : "--session-id", this.sessionID, "--permission-mode", "default", ...(this.options.hookSettingsPath ? ["--settings", this.options.hookSettingsPath] : [])], {
+    this.pty = spawner(this.options.cliPath, [this.options.resumeSession ? "--resume" : "--session-id", this.sessionID, "--permission-mode", "default"], {
       name: "xterm-256color", cols: 100, rows: 32, cwd: this.options.cwd,
       env: { ...process.env, TERM: "xterm-256color" },
     });
     this.ptyDataSubscription = this.pty.onData((data) => {
       this.outputTail = (this.outputTail + data).slice(-64 * 1024);
-      if (!this.input.isStarted() && this.status !== "stopped" && !this.input.snapshot().setup_required) {
+      if (!this.terminalState.isStarted() && this.status !== "stopped" && !this.terminalState.snapshot().setup_required) {
         const prompt = this.outputTail.slice(-4096).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\s+/g, "").toLowerCase();
-        if (prompt.includes("no,exit") && prompt.includes("yes,itrustthisfolder")) this.input.setSetupRequired();
+        if (prompt.includes("no,exit") && prompt.includes("yes,itrustthisfolder")) this.terminalState.setSetupRequired();
       }
       this.options.onOutput?.(data);
       if (this.client && !this.client.destroyed) writePacket(this.client, { type: "output", data: Buffer.from(data, "utf8").toString("base64") });
     });
     this.ptyExitSubscription = this.pty.onExit((event) => {
       this.status = "stopped";
-      this.input.setStopped();
+      this.terminalState.setStopped();
       if (this.client) writePacket(this.client, { type: "stopped", exit_code: event.exitCode, signal: event.signal });
     });
-    if (this.options.startReady !== false) this.input.setStarted();
+    this.terminalState.setStarted();
   }
 
   async start(deferLaunch = false): Promise<void> {
@@ -128,11 +126,8 @@ export class ManagedPtyBroker {
     if (!deferLaunch) this.launch();
   }
 
-  snapshot(): TerminalSnapshot { return { ...this.input.snapshot(), status: this.status }; }
+  snapshot(): TerminalSnapshot { return { ...this.terminalState.snapshot(), status: this.status }; }
   recentOutput(): string { return this.outputTail; }
-
-  async sendPanel(requestID: string, text: string) { return await this.input.panelSend(requestID, text); }
-  async interrupt(): Promise<boolean> { return await this.input.interrupt(); }
 
   /** Only attach to this in-memory managed PTY. Missing sessions fail closed. */
   async openManagedTerminal(nativeSessionID: string): Promise<void> {
@@ -179,14 +174,21 @@ export class ManagedPtyBroker {
   async close(): Promise<void> {
     this.attachWaiter?.reject(new Error("managed_session_not_found"));
     this.ptyDataSubscription?.dispose();
-    this.ptyExitSubscription?.dispose();
     this.client?.destroy();
     this.client = undefined;
     if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
     this.server = undefined;
-    // Plugin shutdown owns the PTY lifecycle in this first version. A detached
-    // supervisor is required before claiming Hub/plugin restart survival.
-    this.pty?.kill();
+    if (this.pty && this.status !== "stopped") {
+      let timer: NodeJS.Timeout | undefined;
+      const exited = new Promise<void>((resolve) => { this.pty.onExit(() => resolve()); });
+      this.pty.kill();
+      await Promise.race([
+        exited,
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 5000); }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+      if (this.snapshot().status !== "stopped") throw new Error("Claude CLI exit was not confirmed; session owner remains uncertain");
+    }
+    this.ptyExitSubscription?.dispose();
     this.token = "";
   }
 
@@ -212,8 +214,8 @@ export class ManagedPtyBroker {
         if (packet.type !== "auth" || packet.token !== this.token) { socket.destroy(); return; }
         if (this.client && this.client !== socket) { socket.destroy(); return; }
         this.client = socket;
-        const attached = this.input.attachLocal();
-        writePacket(socket, { type: "ready", session_id: this.sessionID, owner: attached.owner, read_only: attached.readOnly, terminal: this.snapshot(), output: Buffer.from(this.outputTail, "utf8").toString("base64") });
+        this.terminalState.attachLocal();
+        writePacket(socket, { type: "ready", session_id: this.sessionID, terminal: this.snapshot(), output: Buffer.from(this.outputTail, "utf8").toString("base64") });
         this.pty.resize(100, 32); // Ask the TUI to redraw after a detached interval.
         this.attachWaiter?.resolve();
         continue;
@@ -226,9 +228,8 @@ export class ManagedPtyBroker {
   private async handleClientPacket(socket: Socket, packet: Record<string, unknown>): Promise<void> {
     if (packet.type === "input" && typeof packet.data === "string") {
       const decoded = Buffer.from(packet.data, "base64").toString("utf8");
-      const result = await this.input.localInput(decoded);
-      if (!result.accepted) writePacket(socket, { type: "input_rejected", reason: result.reason || "input lease unavailable" });
-      else if (result.control) writePacket(socket, { type: "lease", owner: this.snapshot().input_owner, terminal: this.snapshot() });
+      if (this.status === "stopped") writePacket(socket, { type: "input_rejected", reason: "Claude CLI is stopped" });
+      else this.pty.write(decoded);
       return;
     }
     if (packet.type === "resize") {
@@ -241,7 +242,7 @@ export class ManagedPtyBroker {
     if (this.client !== socket) return;
     this.client = undefined;
     this.lineBuffers.delete(socket);
-    this.input.detachLocal();
+    this.terminalState.detachLocal();
   }
 
   private createHandoff(value: ManagedTerminalHandoff): string {

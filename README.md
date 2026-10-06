@@ -1,75 +1,46 @@
-# Claude Code plugin for Prism
+# Prism Claude Code 插件
 
-This plugin has two runtime modes. `sdk` is the existing default: it uses the
-Claude Agent SDK to create and resume SDK-owned Claude processes. `managed` is
-the in-progress native Terminal mode: a detached local supervisor owns one
-Claude CLI process and one PTY per session. The computer's Terminal app and
-Prism Panel attach to that same running instance through one input arbiter.
+插件只提供 `mod` 一种运行模式。Prism 通过用户级 Claude Code Mod 控制正在运行的原生 CLI；终端和 Panel 使用同一个 Claude 会话。Claude Agent SDK 执行模式、旧 Managed 输入租约和 zsh 命令包装不再使用。
 
-Managed mode accepts the user's local Claude configuration, including custom
-API endpoints and API-key based access. It does not depend on Claude Channels,
-Remote Control or a claude.ai subscription. PluginBridge stdio remains separate
-from the Claude PTY and is never used as a terminal.
+需要 Claude Code 2.1.287 或更新版本，以及 Hub 提供的 Node.js 22 插件运行时；终端用户无需额外安装一套 Node。沿用用户已有的 Claude 配置，包括 API Key、第三方兼容 API 地址和模型配置；不依赖 Claude 官方账户的远程同步服务。
 
-The managed supervisor survives Plugin/Hub control-connection restarts. It
-records remote message IDs and delivery stages, confirms submission through
-Claude Hooks, and reconciles displayed history from Claude's local transcript.
-It durably records minimal Hook markers before broadcast and replays them to a
-new plugin subscription with stable event IDs. The Hub suppresses duplicate
-native event IDs after replay. Hub waits for a matching Realtime server receipt
-after the server processes the conversation event, then acknowledges the plugin
-and the supervisor deletes its outbox file. Failed writes and missing receipts
-remain pending for replay. The receipt confirms server-side processing, not
-delivery to an open Panel or durable storage of the transient notification.
-History remains recoverable from Claude's local transcript. Full end-to-end
-restart acceptance is still outstanding.
-Only one side owns input at a time. When Claude is idle and the native composer
-has no draft, either Panel send or Terminal typing takes the input lease.
-`Ctrl-]` explicitly switches input ownership; an unfinished local draft blocks
-Panel send until it is cleared or submitted. Permission requests from Panel-owned turns can be allowed once or
-denied in Panel. Local-owned requests stay in Claude's native TUI.
+## 安装和迁移
 
-Managed mode remains opt-in while Terminal.app attachment, complete upgrade
-and restart recovery, and all release targets complete acceptance. It
-currently rejects attachments rather than silently dropping them. The SDK mode
-remains available for existing installations.
+Hub 加载插件时自动安装或更新 `prism-terminal-control@prism-local` 用户级 Mod。无需用户给每次 `claude` 启动添加参数。普通终端和 zsh IDE 内置终端都继续运行原来的 `claude` 命令，`--resume` 等原生参数保持可用。不同 `CLAUDE_CONFIG_DIR` 的配置需要分别安装。
 
-An old SDK conversation is readable while its original process runs. Managed
-mode refuses a second writer to that session. Once the old process exits, the
-next send starts a new managed Claude process with `--resume` and the same
-session ID; it does not attach to the old process in place.
+安装成功后，迁移程序仅删除 Prism 以前写入 `.zshrc` 的精确标记和 source 行，保留用户自己的配置。已经打开的旧 shell 可能仍缓存旧的 `claude` 函数，需重新打开终端；已经运行的旧 Claude 进程可能需要退出后重新打开才能加载 Mod。迁移不会主动结束用户的任务。
 
-To start future native sessions from Terminal.app or a zsh-based IDE terminal,
-enable the optional shell integration with `npm run install:shell` while the
-plugin is installed in Hub's managed mode. A new interactive shell's plain
-`claude` or `Claude` command then starts one managed Claude PTY and attaches the invoking
-terminal to it; Panel discovers and controls that same process. The managed
-adapter watches for new local supervisors and publishes their session index
-and live events without waiting for Hub's periodic discovery scan. Session
-titles come from Claude's local session metadata and update as Claude names
-the conversation. The
-original Claude executable remains available as `command claude`. Commands with
-arguments and non-interactive invocations still use the original executable,
-so they are not automatically managed. Existing standalone Claude processes
-cannot be retroactively attached to this PTY.
+也可以手动管理 Mod：
 
-Claude's first interactive visit to a new project requires workspace trust.
-Panel does not auto-accept it: a remote first-message attempt returns
-`workspace_trust_required` without submitting text or leaving a running orphan.
-Open the project from the local Dashboard's managed Terminal action, accept
-the native prompt, then retry the Panel message.
+```bash
+node scripts/install-mod.mjs install
+node scripts/install-mod.mjs update
+node scripts/install-mod.mjs uninstall
+```
 
-For local development:
+Mod 使用带随机凭据的本机回环连接，连接描述文件仅允许当前用户读取。Hub 或插件断线时，Claude 原生终端仍可使用；恢复连接后重新握手。关闭 Hooks、禁用该 Mod、安全模式或项目信任尚未确认时，Prism 不会使用另一条写入路径绕过限制。
+
+## 会话和输入
+
+- 手动启动的原生 Claude 会话通过 Mod 注册；历史和会话名称来自本地 Claude transcript 文件。
+- 对于已结束且没有活跃所有者的会话，Panel 继续聊天时使用原生 `--resume`，并打开本地终端。仍有活跃 CLI 但没有 Mod 连接时，拒绝启动第二个写入者。
+- 本地草稿和光标由 Claude 自己管理，Panel 提交文本不会通过模拟按键清空本地输入。忙碌时拒绝新的远程提交，不自动重复发送。
+- 请求通过本地记录去重；提交回执与回合开始、完成分别处理。无法确定请求归属时标记不确定，拒绝自动重试和可能误中止本地任务的操作。
+- `/clear` 等改变原生会话 ID 的操作需要重新握手；旧请求不能继续控制新会话。
+
+权限使用 Claude 原生规则，不自动批准项目信任或工具执行。附件和原生 `@file`、粘贴图片等富输入尚未等价支持；远程附件明确拒绝，不静默丢弃。远程文本中的 `@file` 不能视为原生终端的文件引用。
+
+本地历史能够恢复已落盘内容；实时通知回执不等价于已被浏览器显示。新模式发布前仍应在目标系统完成 Terminal.app、IDE 终端、实际 API 提供方以及完整 Panel 链路验收。
+
+## 开发与发布
 
 ```bash
 npm ci --registry=https://registry.npmmirror.com
 npm test
-PRISM_PLUGIN_MODE=managed node dist/index.js
+PRISM_PLATFORM=macos-arm64 node scripts/verify-release.mjs
+node dist/index.js
 ```
 
-The release build uses Node 22 and includes a fixed PluginBridge SDK 0.1.3
-package under `vendor/` until that SDK version is published independently.
-`npm ci` runs `scripts/prepare-node-pty.mjs` to ensure the macOS PTY helper is
-executable; release CI also spawns a real PTY on every target runner. Build
-artifacts must be assembled on their target platform so `node-pty` and the
-Claude Agent SDK's platform packages match that platform.
+`dist/index.js` 的 stdout 仅用于 PluginBridge JSON 行协议。PluginBridge SDK 0.1.3 使用 `vendor/` 内固定包，它负责 Hub 插件协议，不是 Claude Agent SDK。
+
+构建会清理旧的 `dist`，避免被删除的模式进入发布包。`node-pty` 仅用于原生终端的生命周期和显示；构建产物需在目标平台组装。发布验证包含协议探测、PTY 探测和版本一致性检查；本地通过不代表其他平台的原生 UI 已验收。
