@@ -4,7 +4,7 @@ display_name: Claude Code
 description: Connects Prism conversations to native Claude Code through a user-scoped Mod.
 icon_url: https://registry.npmmirror.com/@lobehub/icons-static-avatar/latest/files/avatars/claudecode.webp
 icon_svg_url: https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons/claudecode.svg
-version: 0.3.2
+version: 0.3.4
 plugin_protocol_version: "4"
 min_hub_version: 0.1.0
 integration_mode: protocol-native
@@ -13,7 +13,8 @@ runtime_modes: [mod]
 default_runtime_mode: mod
 managed_terminal_modes: [mod]
 runtime_controls:
-  mod: {}
+  mod:
+    model: stable
 runtime_operations:
   mod:
     rename: unsupported

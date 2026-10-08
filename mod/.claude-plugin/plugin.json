@@ -1,6 +1,8 @@
 {
   "name": "prism-terminal-control",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Local Prism control bridge for native Claude Code sessions",
-  "author": { "name": "Prism" }
+  "author": {
+    "name": "Prism"
+  }
 }

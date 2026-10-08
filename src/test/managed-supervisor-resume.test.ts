@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,4 +55,24 @@ setInterval(() => {}, 1000);
     delete process.env.CLAUDE_MOCK_ARGV;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+ test("orphaned legacy state is preserved and recovered only with an inactive registry owner", () => {
+  const root = mkdtempSync(join(tmpdir(), "prism-orphan-recovery-"));
+  const manager = new ManagedSupervisorManager(join(root, "managed"));
+  const id = "11111111-1111-4111-8111-111111111111";
+  const dir = manager.sessionDir(id);
+  const registry = join(root, "sessions");
+  mkdirSync(dir); mkdirSync(registry);
+  writeFileSync(join(dir, "delivery-ledger.json"), "preserve");
+  try {
+    assert.equal(manager.recoverOrphanedState(id, join(root, "missing")), false);
+    writeFileSync(join(registry, "owner.json"), JSON.stringify({sessionId: id, pid: process.pid}));
+    assert.equal(manager.recoverOrphanedState(id, registry), false);
+    rmSync(join(registry, "owner.json"));
+    assert.equal(manager.recoverOrphanedState(id, registry), true);
+    assert.equal(existsSync(dir), false);
+    const archived = readdirSync(manager.baseDir).find(name => name.startsWith(id + ".recovered-"))!;
+    assert.equal(readFileSync(join(manager.baseDir, archived, "delivery-ledger.json"), "utf8"), "preserve");
+  } finally { manager.close(); rmSync(root, {recursive: true, force: true}); }
 });

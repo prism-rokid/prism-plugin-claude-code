@@ -1,9 +1,10 @@
+import { resolveClaudeCLI } from "./claude-cli.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, watch } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { PluginAdapterError, type ApprovalResolutionRequest, type AttachSessionRequest, type Capability, type DiscoveryResult, type DraftOpenRequest, type DraftOpenResult, type HistoryMessage, type HistoryStreamEvent, type HistoryStreamRequest, type InboundMessage, type ManagedTerminalRequest, type NativeSession, type NativeSessionHint, type PluginAdapter, type PluginEvent, type RunStatus, type SendReceipt, type StartDraftWithMessageRequest, type StartSessionWithMessageRequest, type StartSessionWithMessageResult, type VisibilityResult } from "@rokid-prism/pluginbridge-plugin-sdk";
+import { PluginAdapterError, type ApprovalResolutionRequest, type AttachSessionRequest, type Capability, type ControlSessionRequest, type ControlSessionResult, type DiscoveryResult, type DraftOpenRequest, type DraftOpenResult, type HistoryMessage, type HistoryStreamEvent, type HistoryStreamRequest, type InboundMessage, type ManagedTerminalRequest, type NativeSession, type NativeSessionHint, type PluginAdapter, type PluginEvent, type RunStatus, type SendReceipt, type StartDraftWithMessageRequest, type StartSessionWithMessageRequest, type StartSessionWithMessageResult, type VisibilityResult } from "@rokid-prism/pluginbridge-plugin-sdk";
 import { NativeTranscriptReader, type TranscriptEntry } from "./transcript-reader.js";
 import { ModBridge, type ModEvent } from "./mod-bridge.js";
 import { PersistentDeliveryLedger } from "./mod-delivery-ledger.js";
@@ -11,6 +12,7 @@ import { ManagedSupervisorManager } from "./managed-supervisor-manager.js";
 import { ManagedSupervisorClient } from "./managed-supervisor-client.js";
 import { activeClaudeSessionPID, claudeSessionOwner } from "./claude-session-ownership.js";
 import type { TerminalSnapshot } from "./native-terminal-state.js";
+import { LiveTranscript } from "./live-transcript.js";
 
 const PLUGIN_ID = "claudecode";
 const SURFACE = "claudecode-native-mod";
@@ -49,28 +51,34 @@ export class ModClaudeAdapter implements PluginAdapter {
   private readonly manager: ManagedSupervisorManager;
   private readonly reader = new NativeTranscriptReader();
   private readonly bridge = new ModBridge();
+  private readonly liveTranscript = new LiveTranscript((id) => this.reader.readTranscript(id), (entry) => this.historyMessage(entry));
   private readonly bridgeReady: Promise<void>;
   private modReady?: Promise<void>;
   private readonly deliveryLedgers = new Map<string, PersistentDeliveryLedger>();
   private modInstallError?: string;
   private readonly modStateSignatures = new Map<string, string>();
+  private readonly modelStates = new Map<string, Record<string, unknown>>();
   private readonly modTitleHints = new Map<string, string>();
   private readonly subscribers = new Map<string, Set<EventQueue>>();
   private readonly pluginSubscribers = new Set<EventQueue>();
   private readonly drafts = new Map<string, string>();
   private readonly migrations = new Map<string, Promise<ManagedSupervisorClient>>();
+  private readonly historyClosers = new Set<() => void>();
   constructor(baseDir?: string) {
     this.manager = new ManagedSupervisorManager(baseDir, (id, state) => this.publish(id, "desktop.state.changed", "running", "Claude terminal state changed", { detail_snapshot: { terminal: state } }));
     this.bridgeReady = this.bridge.start();
     this.bridge.onEvent((event) => this.handleModEvent(event));
   }
   id(): string { return PLUGIN_ID; }
-  probe(): Capability {
-    const cli = process.env.PRISM_CLAUDE_CLI || "claude";
-    const check = spawnSync(cli, ["--version"], { timeout: 3000, encoding: "utf8" });
+  async probe(): Promise<Capability> {
+    const cli = resolveClaudeCLI();
+    const check = spawnSync(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env });
     const match = check.stdout?.match(/(\d+)\.(\d+)\.(\d+)/);
     const tuple = match?.slice(1).map(Number);
     const supported = Boolean(tuple && (tuple[0] > 2 || tuple[0] === 2 && (tuple[1] > 1 || tuple[1] === 1 && tuple[2] >= 287)));
+    if (!check.error && check.status === 0 && supported) {
+      try { await this.ensureModReady(); } catch { /* Report installation failure as unavailable. */ }
+    }
     const available = !check.error && check.status === 0 && supported && !this.modInstallError;
     const canControl = available;
     return {
@@ -78,13 +86,13 @@ export class ModClaudeAdapter implements PluginAdapter {
       CanAttachSession: canControl, CanStartSessionWithMessage: canControl, CanOpenDraft: canControl,
       CanListSessions: true, CanReadHistory: true, CanInterrupt: canControl, CanApproval: canControl,
       CanForwardSync: canControl, CanReverseSync: canControl, CanPluginWideWatch: canControl,
-      CanWaitRun: canControl, CanReadStatus: canControl, CanControlSession: false, CanOpenManagedTerminal: canControl,
+      CanWaitRun: canControl, CanReadStatus: canControl, CanControlSession: canControl, CanOpenManagedTerminal: canControl,
       IntegrationMode: "protocol-native", VisibilitySurface: SURFACE,
       UnavailableReason: available ? "" : this.modInstallError || `Claude Code 2.1.287+ with Mods is required: ${check.error?.message || check.stderr || check.stdout || "version check failed"}`,
     };
   }
-  discover(): DiscoveryResult {
-    const capability = this.probe();
+  async discover(): Promise<DiscoveryResult> {
+    const capability = await this.probe();
     return { PluginID: PLUGIN_ID, Surface: SURFACE, Endpoint: this.manager.baseDir, ProcessID: process.pid, SessionHints: { protocol: "claude-code-mod" }, Verified: capability.Available, Detail: capability.UnavailableReason || "Claude Code Mod available" };
   }
   async openDraft(req: DraftOpenRequest): Promise<DraftOpenResult> {
@@ -162,10 +170,14 @@ export class ModClaudeAdapter implements PluginAdapter {
     const requested = req.NativeSessionID || req.NativeThreadID;
     const id = requested;
     const mod = this.bridge.session(id);
-    if (mod && Date.now() - mod.seen_at < 5000) return session(id, mod.cwd);
+    if (mod && Date.now() - mod.seen_at < 5000) {
+      await this.ensureTerminalVisible(id);
+      return session(id, mod.cwd);
+    }
     const client = await this.connectOrResume(id, req.Cwd);
     const terminal = await client.refresh();
     if (terminal.status === "stopped") throw new PluginAdapterError("native_session_stopped", "Claude Code session has stopped");
+    if (terminal.status !== "attached") await client.openTerminal(id);
     return session(id, client.descriptor.cwd);
   }
   async openManagedTerminal(req: ManagedTerminalRequest): Promise<{ ok: boolean; message: string }> {
@@ -207,6 +219,7 @@ export class ModClaudeAdapter implements PluginAdapter {
       modSession = this.bridge.session(id);
     }
     if (!modSession || Date.now() - modSession.seen_at > 5000) throw new PluginAdapterError("mod_session_not_connected", "Claude's native Mod is not connected; refusing terminal-key fallback");
+    await this.ensureTerminalVisible(id);
     if (modSession.turn_id || this.bridge.activeRemoteTurn(id)) throw new PluginAdapterError("session_busy", "Claude is already processing a turn");
     ledger.begin(msg.PrismMessageID, msg.Text);
     ledger.transition(msg.PrismMessageID, "awaiting_submit", "Waiting for native Mod prompt.submit origin event");
@@ -253,6 +266,29 @@ export class ModClaudeAdapter implements PluginAdapter {
     }
     return fallback("Claude run completion was not confirmed within the waiting window");
   }
+  async controlSession(req: ControlSessionRequest): Promise<ControlSessionResult> {
+    const action = req.action.toLowerCase().replace(/_/g, ".");
+    const id = req.session.NativeSessionID;
+    if (action === "conversation.select") {
+      if (!id || (req.session.NativeThreadID && req.session.NativeThreadID !== id)) throw new PluginAdapterError("invalid_session_id", "Claude session and thread identity do not match");
+      if (!this.bridge.session(id) && !await this.reader.sessionInfo(id)) throw new PluginAdapterError("native_session_not_found", "Claude native session is unavailable");
+      // Selecting history does not launch a process or change its model.
+      return {ok:true, action:req.action, thread_id:id, details_confirmed:false};
+    }
+    if (action !== "model.switch") throw new PluginAdapterError("unsupported_control", "Only native model switching is supported");
+    const target = typeof req.target === "string" ? req.target : req.target && typeof req.target === "object" ? String((req.target as Record<string, unknown>).option_id || (req.target as Record<string, unknown>).id || "") : "";
+    if (!target) throw new PluginAdapterError("invalid_model_option", "Model option ID is required");
+    const result = await this.bridge.command(id, "model.set", {model:target});
+    this.updateModels(id, result);
+    return {ok:true, action:req.action, details:await this.readDetail(req.session), details_confirmed:true};
+  }
+  private updateModels(id: string, event: Record<string, unknown>): void {
+    if (typeof event.model !== "string" || !Array.isArray(event.modelOptions)) return;
+    const detail = {current_model:{id:event.model,option_id:event.model,label:event.model}, model_options:event.modelOptions.filter((option): option is string => typeof option === "string").map(option => ({id:option,option_id:option,target:{option_id:option},label:option,available:event.modelLocked !== true})), actions:event.modelLocked === true ? [] : [{id:"model.switch",label:"Switch model",available:true}]};
+    if (JSON.stringify(this.modelStates.get(id)) === JSON.stringify(detail)) return;
+    this.modelStates.set(id,detail);
+    this.publish(id,"desktop.state.changed","running","Claude native model configuration changed",{detail_snapshot:detail});
+  }
   async readDetail(native: NativeSession): Promise<Record<string, unknown>> {
     const id = native.NativeSessionID;
     const mod = this.bridge.session(id);
@@ -263,7 +299,7 @@ export class ModClaudeAdapter implements PluginAdapter {
       const client = this.manager.hasSupervisorOwner(id) ? await this.manager.connect(id).catch(() => undefined) : undefined;
       const approval = this.bridge.approval(id);
       terminal.can_approve = Boolean(approval);
-      return { terminal, approval, primary_action: approval ? "approval" : "send", run: { status: mod.turn_id ? (activeRemote ? "running" : "busy_local") : "idle" }, actions: [] };
+      return { ...this.modelStates.get(id), terminal, approval, primary_action: approval ? "approval" : "send", run: { status: mod.turn_id ? (activeRemote ? "running" : "busy_local") : "idle" }, actions: this.modelStates.get(id)?.actions || [] };
     }
     if (!this.manager.hasSupervisorOwner(id) && !this.manager.hasUncertainManagedState(id)) {
       await this.legacySummary(id, native.Cwd);
@@ -294,43 +330,50 @@ export class ModClaudeAdapter implements PluginAdapter {
   }
   async *readHistoryStream(native: NativeSession, request: HistoryStreamRequest, signal?: AbortSignal): AsyncIterable<HistoryStreamEvent> {
     const id = native.NativeSessionID;
-    const entries = await this.reader.readTranscript(id);
-    const groups: Array<{ turn_id: string; order_key: string; revision: number; messages: HistoryMessage[] }> = [];
-    for (const [index, entry] of entries.entries()) {
-      const message = this.historyMessage(entry);
-      if (entry.role === "user" || groups.length === 0) groups.push({ turn_id: entry.uuid, order_key: String(index).padStart(10, "0"), revision: 1, messages: [message] });
-      else groups[groups.length - 1].messages.push(message);
-    }
-    for (const group of groups.slice(-Math.max(1, request.limit))) {
-      if (signal?.aborted) return;
-      yield { stream_id: request.stream_id, type: "turn", source: "initial", operation: "append", turn: group };
-    }
-    yield { stream_id: request.stream_id, type: "page_end" };
-    if (request.live) {
-      // Live history reconciliation is driven by the local transcript. This
-      // polling path also repairs missed display hooks after reconnects.
-      const seen = new Map(groups.map((group) => [group.turn_id, { signature: JSON.stringify(group.messages), revision: group.revision }]));
-      while (!signal?.aborted) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        const next = await this.reader.readTranscript(id);
-        const latest: typeof groups = [];
-        for (const [index, entry] of next.entries()) {
-          const message = this.historyMessage(entry);
-          if (entry.role === "user" || latest.length === 0) latest.push({ turn_id: entry.uuid, order_key: String(index).padStart(10, "0"), revision: 1, messages: [message] });
-          else latest[latest.length - 1].messages.push(message);
+    type Turns = Awaited<ReturnType<LiveTranscript["snapshot"]>>;
+    const updates: Turns[] = [];
+    let wake: (() => void) | undefined;
+    let closed = false;
+    let overflow = false;
+    const abort = () => { wake?.(); wake = undefined; };
+    const close = () => { closed = true; abort(); };
+    this.historyClosers.add(close);
+    const off = request.live ? this.liveTranscript.subscribe(id, (turns) => {
+      if (closed || overflow) return;
+      if (updates.length >= 1024) overflow = true;
+      else updates.push(turns);
+      abort();
+    }) : () => undefined;
+    const timer = request.live ? setInterval(() => { void this.liveTranscript.refresh(id).catch(() => undefined); }, 1000) : undefined;
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const groups = await this.liveTranscript.snapshot(id);
+      const seen = new Map(groups.map((group) => [group.turn_id, group.revision]));
+      for (const group of groups.slice(-Math.max(1, request.limit))) {
+        if (signal?.aborted || closed) return;
+        yield { stream_id: request.stream_id, type: "turn", source: "initial", operation: "append", turn: group };
+      }
+      yield { stream_id: request.stream_id, type: "page_end" };
+      while (request.live && !signal?.aborted && !closed) {
+        if (overflow) {
+          yield { stream_id: request.stream_id, type: "error", error: "Live history consumer fell behind; reconnect to recover the current reply", retryable: true };
+          return;
         }
-        for (const group of latest) {
-          const signature = JSON.stringify(group.messages);
+        if (!updates.length) await new Promise<void>((resolve) => { wake = resolve; });
+        if (signal?.aborted || closed) return;
+        const next = updates.shift();
+        if (!next) continue;
+        for (const group of next) {
           const previous = seen.get(group.turn_id);
-          if (previous?.signature === signature) continue;
-          const operation = previous ? "replace" : "append";
-          group.revision = previous ? previous.revision + 1 : 1;
-          seen.set(group.turn_id, { signature, revision: group.revision });
-          yield { stream_id: request.stream_id, type: "turn", source: "live", operation, turn: group };
+          if (previous !== undefined && previous >= group.revision) continue;
+          seen.set(group.turn_id, group.revision);
+          yield { stream_id: request.stream_id, type: "turn", source: "live", operation: previous === undefined ? "append" : "replace", turn: group };
         }
       }
+      yield { stream_id: request.stream_id, type: "end" };
+    } finally {
+      off(); this.historyClosers.delete(close); if (timer) clearInterval(timer); signal?.removeEventListener("abort", abort);
     }
-    yield { stream_id: request.stream_id, type: "end" };
   }
   async *subscribe(native: NativeSession, signal?: AbortSignal): AsyncIterable<PluginEvent> {
     const id = native.NativeSessionID;
@@ -501,6 +544,9 @@ export class ModClaudeAdapter implements PluginAdapter {
     throw new PluginAdapterError("approval_stale", "This native Claude session has no active Prism-routed approval");
   }
   async close(): Promise<void> {
+    for (const close of this.historyClosers) close();
+    this.historyClosers.clear();
+    this.liveTranscript.close();
     for (const listeners of this.subscribers.values()) for (const queue of listeners) queue.close();
     for (const queue of this.pluginSubscribers) queue.close();
     this.manager.close(); // The detached supervisor and native Claude PTY stay alive.
@@ -512,9 +558,12 @@ export class ModClaudeAdapter implements PluginAdapter {
       await this.bridgeReady;
       if (!this.modReady) {
         this.modReady = Promise.resolve().then(() => {
-          const install = spawnSync(process.execPath, [join(PLUGIN_ROOT, "scripts", "install-mod.mjs"), "install"], { timeout: 30_000, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] });
+          const cli = resolveClaudeCLI();
+          const install = spawnSync(process.execPath, [join(PLUGIN_ROOT, "scripts", "install-mod.mjs"), "install"], { timeout: 120_000, encoding: "utf8", env: cli.env, stdio: ["ignore", "ignore", "pipe"] });
           if (install.error || install.status !== 0) throw new Error(install.error?.message || String(install.stderr || "Claude Code Mod install/update failed").trim());
+          this.modInstallError = undefined;
         }).catch((error: unknown) => {
+          this.modReady = undefined;
           this.modInstallError = error instanceof Error ? error.message : String(error);
           throw error;
         });
@@ -532,6 +581,12 @@ export class ModClaudeAdapter implements PluginAdapter {
     ledger = new PersistentDeliveryLedger(join(dir, `${id}.json`));
     this.deliveryLedgers.set(id, ledger);
     return ledger;
+  }
+  private async ensureTerminalVisible(id: string): Promise<void> {
+    // Externally launched native/IDE terminals remain controlled by their Mod.
+    if (!this.manager.hasSupervisorOwner(id)) return;
+    const client = await this.manager.connect(id);
+    if ((await client.refresh()).status === "detached") await client.openTerminal(id);
   }
   private async reconnectNativeSession(id: string, cwd: string): Promise<void> {
     const owner = claudeSessionOwner(id, join(this.reader.configDir, "sessions"));
@@ -553,6 +608,11 @@ export class ModClaudeAdapter implements PluginAdapter {
   }
   private handleModEvent(event: ModEvent): void {
     const id = event.sessionId;
+    if (event.kind === "models.current" || event.kind === "models-returned") { this.updateModels(id, event); return; }
+    if (event.kind.startsWith("step.") || event.kind === "prompt.submit" || event.kind === "submit-dispatched" || event.kind === "turn.start" || event.kind === "turn.complete" || event.kind === "session.end") {
+      void this.liveTranscript.handle(event).catch(() => undefined);
+      if (event.kind.startsWith("step.")) return;
+    }
     const requestID = typeof event.prism_request_id === "string" ? event.prism_request_id : "";
     const deliveryID = typeof event.prism_delivery_request_id === "string" ? event.prism_delivery_request_id : "";
     if (event.kind === "session.start" || event.kind === "session.current") {
@@ -582,6 +642,7 @@ export class ModClaudeAdapter implements PluginAdapter {
       if (requestID) {
         try { this.deliveryLedger(id).transition(requestID, "indeterminate", "Claude native session ended before Prism received a confirmed turn completion"); } catch {}
       }
+      this.modelStates.delete(id);
       this.modStateSignatures.delete(id);
       this.publish(id, "desktop.state.changed", "idle", "Claude Code session ended", { remote_control_revoked: true });
       return;
@@ -659,7 +720,12 @@ export class ModClaudeAdapter implements PluginAdapter {
       const summary = await this.legacySummary(id, cwd);
       return (await this.manager.resume(id, summary.cwd)).client;
     }
-    if (this.manager.hasUncertainManagedState(id)) throw new PluginAdapterError("managed_owner_uncertain", "Prior Claude supervisor exited without a clean owner record; refusing to resume the transcript");
+    if (this.manager.hasUncertainManagedState(id)) {
+      const registryDir = join(this.reader.configDir, "sessions");
+      if (!this.bridge.reconcileExitedOwner(id).released || !this.manager.recoverOrphanedState(id, registryDir)) {
+        throw new PluginAdapterError("managed_owner_uncertain", "Prior Claude owner is still active or cannot be verified; refusing to resume the transcript");
+      }
+    }
     if (this.manager.hasSafelyClosedState(id)) {
       const summary = await this.legacySummary(id, cwd);
       return (await this.manager.resume(id, summary.cwd)).client;

@@ -13,10 +13,11 @@ function fixture(version: string) {
   const home = mkdtempSync(join(tmpdir(), "prism-mod-install-test-"));
   const cli = join(home, "fake-claude");
   writeFileSync(cli, `#!${process.execPath}\n` +
-    `import {appendFileSync} from 'node:fs';\n` +
+    `import {appendFileSync,mkdirSync,writeFileSync} from 'node:fs';\n` +
     `const args=process.argv.slice(2);\n` +
     `appendFileSync(process.env.HOME+'/commands.jsonl',JSON.stringify(args)+'\\n');\n` +
     `if(args[0]==='--version') console.log(${JSON.stringify(version + " (Claude Code)")});\n` +
+    `if(process.env.PRISM_TEST_AUTO_ENABLE==='1' && args[0]==='plugin' && ['install','update'].includes(args[1])) {mkdirSync(process.env.CLAUDE_CONFIG_DIR,{recursive:true});writeFileSync(process.env.CLAUDE_CONFIG_DIR+'/settings.json',JSON.stringify({enabledPlugins:{'prism-terminal-control@prism-local':true}}));}\n` +
     `if(process.env.PRISM_TEST_INSTALL_FAIL==='1' && args[0]==='plugin' && ['install','update'].includes(args[1])) {console.error('isolated installation failure');process.exit(1)}\n`);
   chmodSync(cli, 0o700);
   return {
@@ -88,4 +89,15 @@ test("migration installs a user Mod and removes only Prism's legacy zsh intercep
     const plugin = JSON.parse(readFileSync(join(f.home, ".prism", "claudecode", "mod-marketplace", "plugins", "prism-terminal-control", ".claude-plugin", "plugin.json"), "utf8"));
     assert.equal(plugin.name, "prism-terminal-control");
   } finally { f.close(); }
+});
+
+
+test("Claude auto-enabling a newly installed Mod does not trigger a redundant enable failure", unsupportedWindows, () => {
+ const f=fixture("2.1.289");
+ try {
+  const result=f.run({PRISM_TEST_AUTO_ENABLE:"1"});
+  assert.equal(result.status,0,result.stderr);
+  const calls=readFileSync(join(f.home,"commands.jsonl"),"utf8").trim().split("\n").map(line=>JSON.parse(line) as string[]);
+  assert.equal(calls.some(args=>args[1]==="enable"),false);
+ }finally{f.close();}
 });

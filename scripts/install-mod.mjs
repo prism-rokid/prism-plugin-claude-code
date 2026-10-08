@@ -1,3 +1,4 @@
+import { resolveClaudeCLI } from "../dist/claude-cli.js";
 import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -6,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const action = process.argv[2] || "install";
-const cli = process.env.PRISM_CLAUDE_CLI || "claude";
+const resolvedCLI = resolveClaudeCLI();
+const cli = resolvedCLI.command;
 const home = process.env.HOME || process.env.USERPROFILE || (process.env.HOMEDRIVE && process.env.HOMEPATH ? join(process.env.HOMEDRIVE, process.env.HOMEPATH) : "");
 if (!home) throw new Error("Could not resolve the user home directory");
 const configDir = process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
@@ -23,7 +25,7 @@ const sourceLine = '[[ -f "$HOME/.prism/claudecode/claude-shell.zsh" ]] && sourc
 const marker = "# Prism-managed interactive Claude in Terminal.app and zsh-based IDE terminals.";
 
 function run(args) {
-  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe" });
+  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...resolvedCLI.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe" });
   return { status: result.status, error: result.error, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 function report(result, label) {
@@ -108,7 +110,18 @@ try {
   if (add.status !== 0) report(run(["plugin", "marketplace", "update", marketplaceName]), "Claude marketplace update");
   const update = run(["plugin", "update", pluginID, "--scope", "user"]);
   if (update.status !== 0) report(run(["plugin", "install", pluginID, "--scope", "user", "--json"]), "Claude Mod install");
-  if (shouldEnable) report(run(["plugin", "enable", pluginID, "--scope", "user", "--json"]), "Claude Mod enable");
+  if (shouldEnable && jsonFile(join(configDir, "settings.json")).enabledPlugins?.[pluginID] !== true) report(run(["plugin", "enable", pluginID, "--scope", "user", "--json"]), "Claude Mod enable");
+  // Claude's update command keeps a same-version cache, even when a local
+  // marketplace's development module changed. Refresh our owned module atomically.
+  const modVersion = jsonFile(join(pluginSource, ".claude-plugin", "plugin.json")).version;
+  if (typeof modVersion === "string" && /^\d+\.\d+\.\d+$/.test(modVersion)) {
+    const cachedModule = join(configDir, "plugins", "cache", marketplaceName, pluginName, modVersion, "hooks", "register.js");
+    if (existsSync(cachedModule)) {
+      const temporary = `${cachedModule}.prism-${process.pid}.tmp`;
+      await writeFile(temporary, await readFile(join(pluginSource, "hooks", "register.js")), {mode:0o600});
+      await rename(temporary, cachedModule);
+    }
+  }
   installed = true;
   await removeOldShellIntegration();
   await rm(backup, { recursive: true, force: true });

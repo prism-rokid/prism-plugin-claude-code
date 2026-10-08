@@ -19,11 +19,19 @@ async function request($, path, body) {
   return response.text ? JSON.parse(response.text) : {};
 }
 
+const readModels = async ($) => {
+    const row = (await $.config.list()).find(row => row.key === 'model');
+    if (!row || !Array.isArray(row.options)) throw new Error('native_model_options_unavailable');
+    return { model: await $.session.model(), modelOptions: row.options, modelLocked: row.isLocked === true };
+  };
+
 export function register(on) {
   let activeTurnId;
   let polling = false;
   let previousSessionId;
   let timerStarted = false;
+  let lastModelsAt = 0;
+
 
   on('session.start', async ($, e, next) => {
     try {
@@ -48,9 +56,26 @@ export function register(on) {
           const state = await identity('session.current');
           await request($, '/event', state);
           previousSessionId = state.sessionId;
+          if (Date.now() - lastModelsAt >= 3000) {
+            try { await request($, '/event', {kind:'models.current', sessionId:state.sessionId, ...await readModels($)}); lastModelsAt = Date.now(); } catch {}
+          }
           const command = await request($, '/next', { sessionId: state.sessionId });
           if (!command?.id) return;
-          if (command.action === 'read') {
+          if (command.action === 'models.read' || command.action === 'model.set') {
+            try {
+              const before = await readModels($);
+              if (command.action === 'model.set') {
+                if (activeTurnId) throw new Error('session_busy');
+                if (before.modelLocked) throw new Error('model_locked');
+                if (!before.modelOptions.includes(command.model)) throw new Error('invalid_model_option');
+                const result = await $.config.set({key:'model',value:command.model});
+                if (result.deny) throw new Error(result.deny);
+              }
+              await request($, '/event', {kind:'models-returned', id:command.id, sessionId:state.sessionId, ...await readModels($)});
+            } catch (error) {
+              await request($, '/event', {kind:'models-error', id:command.id, sessionId:state.sessionId, error:String(error)});
+            }
+          } else if (command.action === 'read') {
             const draft = await $.prompt.read();
             await request($, '/event', { kind: 'read', id: command.id, sessionId: state.sessionId, draft });
           } else if (command.action === 'submit') {
@@ -81,9 +106,36 @@ export function register(on) {
     return next(e);
   });
   on('turn.start', async ($, e, next) => {
+    if (e.agentId) return next(e);
     activeTurnId = e.turnId;
     try { await request($, '/event', { kind: 'turn.start', sessionId: await $.session.id(), turnId: e.turnId, text: e.text }); } catch {}
     return next(e);
+  });
+  on('turn.step', async function* ($, e, next) {
+    // Call next exactly once and pass every engine chunk through unchanged.
+    // Bridge failures must never consume or rewrite the native response.
+    const stream = next(e);
+    if (e.agentId) return yield* stream;
+    let sessionId;
+    try { sessionId = await $.session.id(); } catch {}
+    const send = async (kind, fields = {}) => {
+      if (!sessionId) return;
+      try { await request($, '/event', { kind, sessionId, turnId: e.turnId, stepIndex: e.index, ...fields }); } catch {}
+    };
+    await send('step.start');
+    let sequence = 0;
+    try {
+      for await (const chunk of stream) {
+        yield chunk;
+        if (chunk.kind === 'text') await send('step.text', { sequence: sequence++, blockIndex: chunk.index, text: chunk.text });
+      }
+      const result = await stream.result;
+      await send('step.complete');
+      return result;
+    } catch (error) {
+      await send('step.failed');
+      throw error;
+    }
   });
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) return next(e);

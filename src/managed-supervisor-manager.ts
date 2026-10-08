@@ -1,6 +1,8 @@
+import { claudeSessionOwner } from "./claude-session-ownership.js";
+import { resolveClaudeCLI } from "./claude-cli.js";
 /** Discovers or starts per-session detached Claude PTY supervisors. */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,6 +70,15 @@ export class ManagedSupervisorManager {
   hasSafelyClosedState(sessionID: string): boolean { const dir = this.sessionDir(sessionID); return !existsSync(join(dir, "supervisor.json")) && existsSync(join(dir, "closed.json")); }
   hasUncertainManagedState(sessionID: string): boolean { return this.hasManagedState(sessionID) && !this.hasSupervisorOwner(sessionID) && !this.hasSafelyClosedState(sessionID); }
 
+  recoverOrphanedState(sessionID: string, registryDir: string): boolean {
+    if (!existsSync(join(this.sessionDir(sessionID), "prism-hooks-settings.json")) && !existsSync(join(this.sessionDir(sessionID), "delivery-ledger.json"))) return false;
+    if (!this.hasUncertainManagedState(sessionID) || claudeSessionOwner(sessionID, registryDir).state !== "inactive") return false;
+    // Preserve legacy hooks and delivery records; they are not a live owner.
+    const dir = this.sessionDir(sessionID);
+    renameSync(dir, `${dir}.recovered-${randomUUID()}`);
+    return true;
+  }
+
   private async startSupervisor(sessionID: string, cwd: string, resume: boolean): Promise<{ sessionID: string; client: ManagedSupervisorClient }> {
     const dataDir = this.sessionDir(sessionID);
     if (existsSync(dataDir)) {
@@ -79,8 +90,9 @@ export class ManagedSupervisorManager {
     mkdirSync(dataDir, { recursive: false, mode: 0o700 });
     const supervisor = fileURLToPath(new URL("./managed-supervisor.js", import.meta.url));
     const helper = fileURLToPath(new URL("./managed-terminal-client.js", import.meta.url));
-    const child = spawn(process.execPath, [supervisor, sessionID, cwd, process.env.PRISM_CLAUDE_CLI || "claude", helper, dataDir, resume ? "resume" : "new"], {
-      detached: true, stdio: "ignore", cwd,
+    const cli = resolveClaudeCLI();
+    const child = spawn(process.execPath, [supervisor, sessionID, cwd, cli.command, helper, dataDir, resume ? "resume" : "new"], {
+      detached: true, stdio: "ignore", cwd, env: cli.env,
     });
     let spawnError: Error | undefined;
     child.once("error", (error) => { spawnError = error; });

@@ -53,6 +53,34 @@ test("one session UUID cannot be claimed or polled by a second live Mod instance
   } finally { await bridge.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a reloaded Mod recovers when the old heartbeat expires without permitting two live owners", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "prism-mod-reload-"));
+  const bridge = new ModBridge(dir);
+  let stamp = Date.now();
+  t.mock.method(Date, "now", () => stamp);
+  await bridge.start();
+  const handshake = (clientInstanceId: string) => post(bridge.descriptorPath, "/event", { kind: "session.current", sessionId: "session-a", clientInstanceId, cwd: dir, version: "2.1.289", surface: ["terminal"], activeTurnId: null });
+  try {
+    await handshake("old");
+    assert.equal((await handshake("new")).error, "mod_session_owner_conflict");
+    stamp += 4000;
+    assert.equal((await handshake("old")).error, "mod_session_owner_conflict");
+    assert.equal((await handshake("new")).error, "mod_session_owner_conflict");
+    stamp += 4000;
+    assert.equal((await handshake("new")).error, "mod_session_owner_conflict");
+    stamp += 1100;
+    assert.equal((await handshake("new")).error, undefined);
+    assert.equal(bridge.session("session-a")?.client_instance_id, "new");
+    const dispatched = bridge.command("session-a", "read");
+    const command = await post(bridge.descriptorPath, "/next", { sessionId: "session-a", clientInstanceId: "new" });
+    assert.equal(command.action, "read");
+    await post(bridge.descriptorPath, "/event", { kind: "read", sessionId: "session-a", clientInstanceId: "new", id: command.id, draft: { text: "preserved", cursor: 9 } });
+    await dispatched;
+    assert.equal(bridge.session("session-a")?.draft?.text, "preserved");
+    assert.equal((await handshake("old")).error, "mod_session_owner_conflict", "a second live owner must block control again");
+  } finally { await bridge.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a normal session.end releases its Mod incarnation before the same transcript is resumed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "prism-mod-bridge-"));
   const bridge = new ModBridge(dir);

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModBridge } from "../mod-bridge.js";
 
-type Hook = (api: any, event: any, next: (event: any) => any) => Promise<any>;
+type Hook = (api: any, event: any, next: (event: any) => any) => any;
 
 async function harness(initiallyOnline = true, descriptorPath?: string) {
   const hooks = new Map<string, Hook>();
@@ -15,6 +15,10 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
   let online = initiallyOnline;
   let submitted = "";
   let sessionID = "native-session";
+  let model = "opus";
+  let locked = false;
+  let denied = "";
+  let modelWrites = 0;
   let deferred: Promise<any> | undefined;
   const api = {
     env: { get: async () => "/isolated-home" },
@@ -34,6 +38,7 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
       return { ok: true, status: 200, text: JSON.stringify(value) };
     } },
     session: {
+      model: async () => "resolved-" + model,
       id: async () => sessionID,
       cwd: async () => "/isolated-project",
       version: async () => ({ version: "2.1.289" }),
@@ -50,6 +55,10 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
         return { text: options.text, origin: { kind: "plugin", name: "prism-terminal-control", asUser: true } };
       },
     },
+    config: {
+      list: async () => [{key:'model',options:['opus','sonnet'],isLocked:locked}],
+      set: async ({value}: any) => { modelWrites++; if (denied) return {deny:denied}; model = value; return {value}; },
+    },
     turn: { abort: async () => undefined },
   };
   const moduleURL = new URL("../../mod/hooks/register.js", import.meta.url).href;
@@ -57,6 +66,9 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
   register((name: string, hook: Hook) => hooks.set(name, hook));
   return {
     hooks, timers, events, commands,
+    lockModel: () => { locked = true; },
+    denyModel: () => { denied = "native policy denied"; },
+    modelWrites: () => modelWrites,
     online: () => { online = true; },
     submitted: () => submitted,
     setSession: (id: string) => { sessionID = id; },
@@ -66,6 +78,7 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
       assert.ok(hook, `hook ${name} registered`);
       return hook(api, event, (value) => value);
     },
+    stream: (event: any, next: (event: any) => any) => hooks.get("turn.step")!(api, event, next) as AsyncGenerator<any, any>,
     tick: async () => { for (const timer of timers) await timer(); },
   };
 }
@@ -77,6 +90,50 @@ test("a native Claude started before Hub registers its heartbeat and reconnects 
   h.online();
   await h.tick();
   assert.ok(h.events.some((event) => event.sessionId === "native-session" && ["session.start", "session.current"].includes(event.kind)));
+});
+
+test("turn.step forwards each text chunk separately and preserves all engine chunks and result", async () => {
+  const h = await harness();
+  await h.emit("session.start");
+  const chunks = [{ kind: "engine", ref: 1 }, { kind: "thinking", index: 0, text: "private" }, { kind: "text", index: 1, text: "你" }, { kind: "text", index: 1, text: "好" }, { kind: "tool", index: 2, id: "tool" }, { kind: "stop" }];
+  const result = { turnId: "turn", index: 0, answer: "你好", toolUses: [], stopReason: "end_turn" };
+  let calls = 0;
+  const stream = h.stream({ turnId: "turn", index: 0 }, () => {
+    calls++;
+    return Object.assign((async function* () { for (const chunk of chunks) yield chunk; return result; })(), { result: Promise.resolve(result) });
+  });
+  const output = [];
+  let finished;
+  while (true) { const value = await stream.next(); if (value.done) { finished = value.value; break; } output.push(value.value); }
+  assert.equal(calls, 1);
+  assert.deepEqual(output, chunks);
+  assert.equal(finished, result);
+  const text = h.events.filter((event) => event.kind === "step.text");
+  assert.deepEqual(text.map((event) => [event.sequence, event.blockIndex, event.text]), [[0, 1, "你"], [1, 1, "好"]]);
+  assert.ok(h.events.some((event) => event.kind === "step.complete"));
+  assert.ok(!h.events.some((event) => event.text === "private"));
+});
+
+test("turn.step preserves native output when Hub is offline and excludes subagents", async () => {
+  const h = await harness(false);
+  const chunk = { kind: "text", index: 0, text: "still native" };
+  const next = () => Object.assign((async function* () { yield chunk; })(), { result: Promise.resolve({ answer: chunk.text }) });
+  const output = [];
+  for await (const value of h.stream({ turnId: "turn", index: 0 }, next)) output.push(value);
+  assert.deepEqual(output, [chunk]);
+  h.online();
+  for await (const _value of h.stream({ turnId: "child", index: 0, agentId: "agent" }, next)) {}
+  assert.equal(h.events.length, 0);
+});
+
+test("turn.step reports a failed stream without swallowing the native error", async () => {
+  const h = await harness();
+  await h.emit("session.start");
+  const failure = new Error("interrupted");
+  const stream = h.stream({ turnId: "turn", index: 0 }, () => Object.assign((async function* () { yield { kind: "text", index: 0, text: "partial" }; throw failure; })(), { result: Promise.resolve(undefined) }));
+  await assert.rejects(async () => { for await (const _chunk of stream) {} }, failure);
+  assert.ok(h.events.some((event) => event.kind === "step.failed"));
+  assert.ok(!h.events.some((event) => event.kind === "step.complete"));
 });
 
 test("Mod remote submission works without receiving its own prompt.submit hook and preserves draft", async () => {
@@ -134,4 +191,27 @@ test("clear rebinds the Mod and a late captured submit receipt cannot revive the
     await assert.rejects(bridge.command("native-session", "submit", { text: "old control", requestId: "must-reject" }), /mod_session_not_connected/);
     assert.equal(bridge.activeRemoteTurn("after-clear"), undefined);
   } finally { await bridge.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+ test("model list and switch use native configuration and read back the resolved session model", async () => {
+  const h = await harness(); await h.emit('session.start');
+  h.commands.push({id:'list',action:'models.read'}); await h.tick();
+  const list = h.events.find(event => event.id === 'list');
+  assert.deepEqual(list.modelOptions, ['opus','sonnet']); assert.equal(list.model,'resolved-opus');
+  h.commands.push({id:'switch',action:'model.set',model:'sonnet'}); await h.tick();
+  const switched = h.events.find(event => event.id === 'switch');
+  assert.equal(switched.model,'resolved-sonnet'); assert.equal(h.modelWrites(),1);
+  h.commands.push({id:'invalid',action:'model.set',model:'fabricated'}); await h.tick();
+  assert.equal(h.events.find(event => event.id === 'invalid').kind,'models-error'); assert.equal(h.modelWrites(),1);
+  await h.emit('turn.start',{turnId:'busy'});
+  h.commands.push({id:'busy',action:'model.set',model:'opus'}); await h.tick();
+  assert.match(h.events.find(event => event.id === 'busy' && event.kind === 'models-error').error,/session_busy/);
+});
+ test("locked or denied native model settings never report switch success", async () => {
+  for (const mode of ['locked','denied']) {
+    const h = await harness(); await h.emit('session.start');
+    if (mode === 'locked') h.lockModel(); else h.denyModel();
+    h.commands.push({id:mode,action:'model.set',model:'sonnet'}); await h.tick();
+    assert.equal(h.events.find(event => event.id === mode).kind,'models-error');
+  }
 });

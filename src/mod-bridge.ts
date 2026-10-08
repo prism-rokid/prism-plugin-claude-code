@@ -16,7 +16,7 @@ export type ModSession = {
   draft?: { text: string; cursor: number } | null;
 };
 export type ModEvent = Record<string, unknown> & { kind: string; sessionId: string };
-export type ModCommand = { id: string; action: "read" | "submit" | "abort"; text?: string; turnId?: string; requestId?: string; delivered?: boolean };
+export type ModCommand = { id: string; action: "read" | "submit" | "abort" | "models.read" | "model.set"; text?: string; model?: string; turnId?: string; requestId?: string; delivered?: boolean };
 export type ModRemoteSubmission = { requestId: string; turnId?: string; accepted: boolean; ambiguous: boolean };
 
 type Pending = { command: ModCommand; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
@@ -30,6 +30,7 @@ export class ModBridge {
   private server?: Server;
   private sessions = new Map<string, ModSession>();
   private conflictedSessions = new Set<string>();
+  private ownerHeartbeats = new Map<string, Map<string, number>>();
   private commands = new Map<string, ModCommand[]>();
   private pending = new Map<string, Pending>();
   private approvals = new Map<string, Approval>();
@@ -79,6 +80,7 @@ export class ModBridge {
     this.revokeOwner(sessionID);
     this.sessions.delete(sessionID);
     this.conflictedSessions.delete(sessionID);
+    this.ownerHeartbeats.delete(sessionID);
     return { released: true, ...(requestID ? { requestID } : {}) };
   }
   approval(sessionID: string): Record<string, unknown> | null {
@@ -110,7 +112,7 @@ export class ModBridge {
   async command(sessionID: string, action: ModCommand["action"], fields: Omit<ModCommand, "id" | "action"> = {}, timeoutMs = 10_000): Promise<Record<string, unknown>> {
     const session = this.sessions.get(sessionID);
     if (!session || Date.now() - session.seen_at > 5000) throw new Error("mod_session_not_connected");
-    if (action === "submit" && (session.turn_id || this.inFlight.has(sessionID) || (this.commands.get(sessionID)?.length || 0) > 0)) throw new Error("session_busy");
+    if ((action === "submit" || action === "model.set") && (session.turn_id || this.inFlight.has(sessionID) || (this.commands.get(sessionID)?.length || 0) > 0)) throw new Error("session_busy");
     if (action === "abort") {
       const active = this.remoteTurn.get(sessionID);
       if (!active || !active.turnId || !fields.turnId || active.turnId !== fields.turnId || active.ambiguous) throw new Error("remote_turn_identity_unavailable");
@@ -147,6 +149,7 @@ export class ModBridge {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("mod_bridge_closed")); }
     for (const approval of this.approvals.values()) { clearTimeout(approval.timer); approval.resolve("deny"); }
     this.approvals.clear();
+    this.ownerHeartbeats.clear(); this.conflictedSessions.clear();
     this.pending.clear(); this.commands.clear(); this.inFlight.clear(); this.remoteTurn.clear(); this.deferredCompletion.clear();
     if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
     this.server = undefined;
@@ -201,12 +204,22 @@ export class ModBridge {
         }
       }
       const previous = this.sessions.get(event.sessionId);
-      if (this.conflictedSessions.has(event.sessionId)) return this.respond(res, 409, { error: "mod_session_owner_conflict" });
-      if (previous?.client_instance_id && previous.client_instance_id !== event.clientInstanceId) {
+      // A reload creates a new Mod incarnation in the same native process.
+      // Track contenders even while blocked: two live owners stay blocked,
+      // while a replacement recovers after the old heartbeat has expired.
+      const stamp = Date.now();
+      let owners = this.ownerHeartbeats.get(event.sessionId);
+      if (!owners) { owners = new Map(); this.ownerHeartbeats.set(event.sessionId, owners); }
+      if (previous?.client_instance_id && !owners.has(previous.client_instance_id)) owners.set(previous.client_instance_id, previous.seen_at);
+      owners.set(event.clientInstanceId as string, stamp);
+      for (const [owner, seen] of owners) if (stamp - seen > 5000) owners.delete(owner);
+      if (owners.size > 1) {
         this.conflictedSessions.add(event.sessionId);
         this.revokeOwner(event.sessionId);
         return this.respond(res, 409, { error: "mod_session_owner_conflict" });
       }
+      this.conflictedSessions.delete(event.sessionId);
+      if (previous?.client_instance_id && previous.client_instance_id !== event.clientInstanceId) this.revokeOwner(event.sessionId);
       this.sessions.set(event.sessionId, { ...previous, session_id: event.sessionId, cwd: event.cwd as string, ...(typeof event.pid === "number" ? { pid: event.pid } : {}), client_instance_id: event.clientInstanceId as string, version: event.version as string, surface: Array.isArray(event.surface) ? event.surface.filter((x): x is string => typeof x === "string") : [], seen_at: Date.now(), turn_id: typeof event.activeTurnId === "string" ? event.activeTurnId : event.activeTurnId === null ? undefined : previous?.turn_id });
     } else {
       if (this.conflictedSessions.has(event.sessionId)) return this.respond(res, 409, { error: "mod_session_owner_conflict" });
@@ -224,6 +237,7 @@ export class ModBridge {
         if (active?.requestId) event = { ...event, prism_request_id: active.requestId };
         this.revokeOwner(event.sessionId);
         this.sessions.delete(event.sessionId);
+        this.ownerHeartbeats.delete(event.sessionId);
       }
     }
     if (event.kind === "prompt.submit") {
