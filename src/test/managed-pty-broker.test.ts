@@ -47,3 +47,27 @@ test("native attach preserves terminal input bytes through the PTY lifecycle bro
   await assert.rejects(broker.openManagedTerminal("native-1"), /native_terminal_attach_timeout/);
   assert.equal(spawned, 1);
 });
+
+test("Claude workspace trust prompt disables remote send after PTY startup", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "prism-trust-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let onData: ((data: string) => void) | undefined;
+  const exitListeners = new Set<(event: { exitCode: number; signal?: number }) => void>();
+  const pty: ManagedPtyProcess = {
+    pid: 4243, write: () => {}, resize: () => {}, kill: () => { for (const listener of exitListeners) listener({ exitCode: 0 }); },
+    onData: (listener) => { onData = listener; return { dispose() {} }; },
+    onExit: (listener) => { exitListeners.add(listener); return { dispose: () => exitListeners.delete(listener) }; },
+  };
+  const broker = new ManagedPtyBroker({
+    sessionID: "trust-test", cwd: dir, cliPath: "claude", helperPath: "attach.js", dataDir: dir,
+    platform: "linux", spawner: () => pty,
+  });
+  await broker.start();
+  t.after(() => broker.close());
+  assert.equal(broker.snapshot().can_send, true);
+
+  onData?.("Quick safety check: Is this a project you created or one you trust?\r\nYes, I trust this folder\r\nNo, exit");
+
+  assert.equal(broker.snapshot().setup_required, true);
+  assert.equal(broker.snapshot().can_send, false);
+});

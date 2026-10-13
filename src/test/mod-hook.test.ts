@@ -126,6 +126,19 @@ test("turn.step preserves native output when Hub is offline and excludes subagen
   assert.equal(h.events.length, 0);
 });
 
+test("main turn step remains correlated when Claude includes its agent id", async () => {
+  const h = await harness();
+  await h.emit("session.start");
+  h.online();
+  await h.emit("turn.start", { turnId: "parent-turn" });
+  const chunk = { kind: "text", index: 0, text: "main output" };
+  const next = () => Object.assign((async function* () { yield chunk; })(), { result: Promise.resolve({ answer: chunk.text }) });
+
+  for await (const _value of h.stream({ turnId: "parent-turn", index: 0, agentId: "main" }, next)) {}
+
+  assert.ok(h.events.some((event) => event.kind === "step.text" && event.text === "main output"));
+});
+
 test("turn.step reports a failed stream without swallowing the native error", async () => {
   const h = await harness();
   await h.emit("session.start");
@@ -155,7 +168,7 @@ test("subagent completion cannot report the main turn as completed", async () =>
   await h.emit("turn.start", { turnId: "parent-turn" });
   await h.emit("turn.complete", { turnId: "child-turn", agentId: "subagent-1", reason: "completed" });
   assert.equal(h.events.filter((event) => event.kind === "turn.complete").length, 0);
-  await h.emit("turn.complete", { turnId: "parent-turn", reason: "completed" });
+  await h.emit("turn.complete", { turnId: "parent-turn", agentId: "main", reason: "completed" });
   assert.equal(h.events.filter((event) => event.kind === "turn.complete").length, 1);
 });
 

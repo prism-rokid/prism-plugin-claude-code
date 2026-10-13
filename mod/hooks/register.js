@@ -115,7 +115,7 @@ export function register(on) {
     // Call next exactly once and pass every engine chunk through unchanged.
     // Bridge failures must never consume or rewrite the native response.
     const stream = next(e);
-    if (e.agentId) return yield* stream;
+    if (e.agentId && (typeof e.turnId !== 'string' || e.turnId !== activeTurnId)) return yield* stream;
     let sessionId;
     try { sessionId = await $.session.id(); } catch {}
     const send = async (kind, fields = {}) => {
@@ -138,7 +138,7 @@ export function register(on) {
     }
   });
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId) return next(e);
+    if (e.agentId && (typeof e.turnId !== 'string' || e.turnId !== activeTurnId)) return next(e);
     try { await request($, '/event', { kind: 'turn.complete', sessionId: await $.session.id(), turnId: e.turnId, reason: e.reason, isAborted: e.isAborted }); } catch {}
     if (activeTurnId === e.turnId) activeTurnId = undefined;
     return next(e);

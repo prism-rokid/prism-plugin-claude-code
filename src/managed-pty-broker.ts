@@ -100,9 +100,11 @@ export class ManagedPtyBroker {
     });
     this.ptyDataSubscription = this.pty.onData((data) => {
       this.outputTail = (this.outputTail + data).slice(-64 * 1024);
-      if (!this.terminalState.isStarted() && this.status !== "stopped" && !this.terminalState.snapshot().setup_required) {
+      if (this.status !== "stopped" && !this.terminalState.snapshot().setup_required) {
         const prompt = this.outputTail.slice(-4096).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\s+/g, "").toLowerCase();
-        if (prompt.includes("no,exit") && prompt.includes("yes,itrustthisfolder")) this.terminalState.setSetupRequired();
+        const trustPrompt = prompt.includes("quicksafetycheck") && prompt.includes("trustthisfolder");
+        const legacyTrustPrompt = prompt.includes("no,exit") && prompt.includes("yes,itrustthisfolder");
+        if (trustPrompt || legacyTrustPrompt) this.terminalState.setSetupRequired();
       }
       this.options.onOutput?.(data);
       if (this.client && !this.client.destroyed) writePacket(this.client, { type: "output", data: Buffer.from(data, "utf8").toString("base64") });

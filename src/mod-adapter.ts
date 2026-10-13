@@ -140,8 +140,10 @@ export class ModClaudeAdapter implements PluginAdapter {
     }
     try { await this.bridge.waitForSession(sessionID, CONFIRM_TIMEOUT_MS); }
     catch {
+      const terminal = await client.refresh().catch(() => undefined);
       await client.shutdown();
       await this.manager.discardUnstarted(sessionID);
+      if (terminal?.setup_required) throw new PluginAdapterError("workspace_trust_required", "Claude requires project trust in a local managed Terminal before Panel can start this project");
       throw new PluginAdapterError("mod_unavailable", "Claude Code started without the Prism Mod handshake; refusing a second control path");
     }
     const receipt = await this.send(native, req.Message);
@@ -189,7 +191,13 @@ export class ModClaudeAdapter implements PluginAdapter {
       try { await client.openTerminal(sessionID); }
       catch (error) { await client.shutdown(); await this.manager.discardUnstarted(sessionID); throw error; }
       try { await this.bridge.waitForSession(sessionID, CONFIRM_TIMEOUT_MS); }
-      catch { await client.shutdown(); await this.manager.discardUnstarted(sessionID); throw new PluginAdapterError("mod_unavailable", "Native CLI did not load the Prism Mod"); }
+      catch {
+        const terminal = await client.refresh().catch(() => undefined);
+        await client.shutdown();
+        await this.manager.discardUnstarted(sessionID);
+        if (terminal?.setup_required) throw new PluginAdapterError("workspace_trust_required", "Claude requires project trust in a local managed Terminal before Panel can start this project");
+        throw new PluginAdapterError("mod_unavailable", "Native CLI did not load the Prism Mod");
+      }
       return { ok: true, message: `Claude native Terminal opened for session ${sessionID}` };
     }
     if (req.native_thread_id && req.native_thread_id !== req.native_session_id) throw new PluginAdapterError("managed_session_identity_mismatch", "Claude session and thread identity do not match");

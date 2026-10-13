@@ -15,9 +15,10 @@ export function resolveClaudeCLI(env: NodeJS.ProcessEnv = process.env, home = en
   } else {
     command = names.map(inPath).find(Boolean);
     if (!command) {
-      const bins = [join(home, ".local", "bin"), join(home, ".claude", "local"), "/opt/homebrew/bin", "/usr/local/bin"];
+      const bins = [join(home, ".local", "bin"), join(home, ".claude", "local")];
       const nvm = env.NVM_DIR || join(home, ".nvm");
       const versionsDir = join(nvm, "versions", "node");
+      const versionBins: string[] = [];
       try {
         const versions = readdirSync(versionsDir).filter(v => /^v\d+\.\d+\.\d+$/.test(v)).sort((a,b) => {
           const av=a.slice(1).split(".").map(Number), bv=b.slice(1).split(".").map(Number);
@@ -26,9 +27,12 @@ export function resolveClaudeCLI(env: NodeJS.ProcessEnv = process.env, home = en
         let preferred = "";
         try { preferred = readFileSync(join(nvm, "alias", "default"), "utf8").trim().replace(/^v?/, "v"); } catch {}
         versions.sort((a,b) => Number(b === preferred)-Number(a === preferred));
-        bins.push(...versions.map(v => join(versionsDir, v, "bin")));
+        versionBins.push(...versions.map(v => join(versionsDir, v, "bin")));
       } catch {}
-      command = bins.flatMap(bin => names.map(name => join(bin,name))).find(executable);
+      const fallbackBins = ["/opt/homebrew/bin", "/usr/local/bin"];
+      command = [...bins, ...versionBins, ...fallbackBins]
+        .flatMap(bin => names.map(name => join(bin,name)))
+        .find(executable);
     }
   }
   command ||= "claude";
