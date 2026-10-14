@@ -203,7 +203,10 @@ export class ModClaudeAdapter implements PluginAdapter {
     if (req.native_thread_id && req.native_thread_id !== req.native_session_id) throw new PluginAdapterError("managed_session_identity_mismatch", "Claude session and thread identity do not match");
     const id = req.native_session_id;
     const mod = this.bridge.session(id);
-    if (mod && Date.now() - mod.seen_at < 5000) return { ok: true, message: "Claude native session is already connected through its Mod" };
+    if (mod && Date.now() - mod.seen_at < 5000) {
+      await this.ensureTerminalVisible(id);
+      return { ok: true, message: "Claude native session is already connected through its Mod" };
+    }
     const client = await this.connectOrResume(id, req.cwd || "");
     await client.openTerminal(req.native_session_id);
     return { ok: true, message: "Claude native Terminal attached" };

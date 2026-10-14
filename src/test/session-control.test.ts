@@ -12,6 +12,20 @@ test("conversation selection accepts native history without invoking model contr
   await assert.rejects(invoke({NativeSessionID:"native"},"unsupported.action"), /Only native model/);
 });
 
+test("managed terminal request attaches an active Mod session before reporting success", async () => {
+  const opened: string[] = [];
+  const adapter = {
+    ensureModReady: async () => {},
+    bridge: { session: () => ({ seen_at: Date.now(), cwd: "/tmp" }) },
+    ensureTerminalVisible: async (id: string) => { opened.push(id); },
+  };
+  const result = await ModClaudeAdapter.prototype.openManagedTerminal.call(adapter as any, {
+    plugin_id: "claudecode", native_session_id: "native", native_thread_id: "native", cwd: "/tmp",
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(opened, ["native"]);
+});
+
 test("Mod session heartbeats publish idle after the active Claude turn ends", () => {
   const events: any[] = [];
   const snapshots = new Map<string, any>([["native", { cwd: "/tmp", version: "2.1.289", surface: ["terminal"], turn_id: "turn-1" }]]);
