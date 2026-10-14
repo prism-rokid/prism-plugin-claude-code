@@ -288,11 +288,18 @@ export class ModClaudeAdapter implements PluginAdapter {
     if (!target) throw new PluginAdapterError("invalid_model_option", "Model option ID is required");
     const result = await this.bridge.command(id, "model.set", {model:target});
     this.updateModels(id, result);
+    const currentModel = this.modelStates.get(id)?.current_model as {option_id?: unknown; id?: unknown; resolved_model?: unknown} | undefined;
+    const selectedOption = String(currentModel?.option_id || currentModel?.id || "");
+    if (selectedOption !== target) {
+      const effectiveModel = String(currentModel?.resolved_model || result.model || "unknown");
+      throw new PluginAdapterError("model_switch_not_reflected", `Claude selected ${selectedOption || "unknown"} after choosing ${target} (effective model: ${effectiveModel})`);
+    }
     return {ok:true, action:req.action, details:await this.readDetail(req.session), details_confirmed:true};
   }
   private updateModels(id: string, event: Record<string, unknown>): void {
     if (typeof event.model !== "string" || !Array.isArray(event.modelOptions)) return;
-    const detail = {current_model:{id:event.model,option_id:event.model,label:event.model}, model_options:event.modelOptions.filter((option): option is string => typeof option === "string").map(option => ({id:option,option_id:option,target:{option_id:option},label:option,available:event.modelLocked !== true})), actions:event.modelLocked === true ? [] : [{id:"model.switch",label:"Switch model",available:true}]};
+    const selectedOption = typeof event.modelOption === "string" && event.modelOption.trim() ? event.modelOption : event.model;
+    const detail = {current_model:{id:selectedOption,option_id:selectedOption,label:selectedOption,resolved_model:event.model}, model_options:event.modelOptions.filter((option): option is string => typeof option === "string").map(option => ({id:option,option_id:option,target:{option_id:option},label:option,available:event.modelLocked !== true})), actions:event.modelLocked === true ? [] : [{id:"model.switch",label:"Switch model",available:true}]};
     if (JSON.stringify(this.modelStates.get(id)) === JSON.stringify(detail)) return;
     this.modelStates.set(id,detail);
     this.publish(id,"desktop.state.changed","running","Claude native model configuration changed",{detail_snapshot:detail});
@@ -629,8 +636,25 @@ export class ModClaudeAdapter implements PluginAdapter {
       const signature = `${snapshot.cwd}|${snapshot.version}|${snapshot.surface.join(",")}|${snapshot.turn_id || ""}`;
       if (this.modStateSignatures.get(id) === signature) return;
       this.modStateSignatures.set(id, signature);
-      const terminal: TerminalSnapshot = { status: snapshot.surface.includes("terminal") ? "attached" : "detached", input_owner: null, can_send: !snapshot.turn_id, can_interrupt: Boolean(this.bridge.activeRemoteTurn(id)), can_approve: false, ...(snapshot.turn_id && !this.bridge.activeRemoteTurn(id) ? { reason: "A local Claude turn is running; Prism will not reassign it" } : {}) };
-      this.publish(id, "desktop.state.changed", "running", "Native Claude Mod session connected", { detail_snapshot: { terminal, approval: null }, native_session: session(id, snapshot.cwd) });
+      const activeRemote = this.bridge.activeRemoteTurn(id);
+      const running = Boolean(snapshot.turn_id || activeRemote);
+      const terminal: TerminalSnapshot = { status: snapshot.surface.includes("terminal") ? "attached" : "detached", input_owner: null, can_send: !snapshot.turn_id, can_interrupt: Boolean(activeRemote), can_approve: false, ...(snapshot.turn_id && !activeRemote ? { reason: "A local Claude turn is running; Prism will not reassign it" } : {}) };
+      this.publish(id, "desktop.state.changed", running ? "running" : "idle", "Native Claude Mod session connected", {
+        detail_snapshot: {
+          terminal,
+          approval: null,
+          run: {
+            task_id: activeRemote?.requestId || snapshot.turn_id || "",
+            status: running ? "running" : "idle",
+            summary: running ? "Claude turn running" : "Claude is idle",
+            interruptible: Boolean(activeRemote),
+            can_queue: false,
+            approval_blocked: false,
+            primary_action: running ? "interrupt" : "send",
+          },
+        },
+        native_session: session(id, snapshot.cwd),
+      });
       if (typeof event.previousSessionId === "string" && event.previousSessionId !== id) {
         const previousID = event.previousSessionId;
         if (typeof event.previousRequestId === "string") this.deliveryLedger(previousID).transition(event.previousRequestId, "indeterminate", "Native session identity changed before this Prism request completed; it remains bound to the previous transcript");

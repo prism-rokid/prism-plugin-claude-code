@@ -16,15 +16,21 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
   let submitted = "";
   let sessionID = "native-session";
   let model = "opus";
+  let configModelValue: string | undefined;
+  let settings: Record<string, string> = {};
+  let resolvedModel: string | undefined;
+  let resolvedModels: Record<string, string> = {};
   let locked = false;
   let denied = "";
   let modelWrites = 0;
   let deferred: Promise<any> | undefined;
   const api = {
     env: { get: async () => "/isolated-home" },
-    fs: { read: async () => {
+    fs: { read: async (path: string) => {
+      if (settings[path]) return JSON.stringify({model:settings[path]});
       if (!online) throw new Error("Hub is not running");
       if (descriptorPath) return readFileSync(descriptorPath, "utf8");
+      if (path !== "/isolated-home/.prism/claudecode/mod-bridge.json") throw new Error("file not found");
       return JSON.stringify({ port: 12345, token: "isolated-token", instance_id: "bridge-a" });
     } },
     http: { fetch: async (url: string, options: any) => {
@@ -38,7 +44,7 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
       return { ok: true, status: 200, text: JSON.stringify(value) };
     } },
     session: {
-      model: async () => "resolved-" + model,
+      model: async () => resolvedModels[model] || resolvedModel || "resolved-" + model,
       id: async () => sessionID,
       cwd: async () => "/isolated-project",
       version: async () => ({ version: "2.1.289" }),
@@ -56,7 +62,7 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
       },
     },
     config: {
-      list: async () => [{key:'model',options:['opus','sonnet'],isLocked:locked}],
+      list: async () => [{key:'model',value:configModelValue ?? model,options:['opus','sonnet'],isLocked:locked}],
       set: async ({value}: any) => { modelWrites++; if (denied) return {deny:denied}; model = value; return {value}; },
     },
     turn: { abort: async () => undefined },
@@ -69,6 +75,10 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
     lockModel: () => { locked = true; },
     denyModel: () => { denied = "native policy denied"; },
     modelWrites: () => modelWrites,
+    pinResolvedModel: (value: string) => { resolvedModel = value; },
+    setResolvedModels: (value: Record<string, string>) => { resolvedModels = value; },
+    setConfigModelValue: (value: string) => { configModelValue = value; },
+    setSetting: (path: string, value: string) => { settings[path] = value; },
     online: () => { online = true; },
     submitted: () => submitted,
     setSession: (id: string) => { sessionID = id; },
@@ -206,19 +216,50 @@ test("clear rebinds the Mod and a late captured submit receipt cannot revive the
   } finally { await bridge.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
- test("model list and switch use native configuration and read back the resolved session model", async () => {
+test("model list and switch use native configuration and read back the resolved session model", async () => {
   const h = await harness(); await h.emit('session.start');
   h.commands.push({id:'list',action:'models.read'}); await h.tick();
   const list = h.events.find(event => event.id === 'list');
   assert.deepEqual(list.modelOptions, ['opus','sonnet']); assert.equal(list.model,'resolved-opus');
+  h.setResolvedModels({sonnet:'claude-sonnet-4-8'});
   h.commands.push({id:'switch',action:'model.set',model:'sonnet'}); await h.tick();
   const switched = h.events.find(event => event.id === 'switch');
-  assert.equal(switched.model,'resolved-sonnet'); assert.equal(h.modelWrites(),1);
+  assert.equal(switched.model,'claude-sonnet-4-8'); assert.equal(h.modelWrites(),1);
   h.commands.push({id:'invalid',action:'model.set',model:'fabricated'}); await h.tick();
   assert.equal(h.events.find(event => event.id === 'invalid').kind,'models-error'); assert.equal(h.modelWrites(),1);
   await h.emit('turn.start',{turnId:'busy'});
   h.commands.push({id:'busy',action:'model.set',model:'opus'}); await h.tick();
   assert.match(h.events.find(event => event.id === 'busy' && event.kind === 'models-error').error,/session_busy/);
+});
+
+test("model list resolves the selected alias from Claude settings when config.list omits it", async () => {
+  const h = await harness(); await h.emit('session.start');
+  h.setConfigModelValue('claude-opus-4-7');
+  h.setSetting('/isolated-home/.claude/settings.json','sonnet');
+  h.commands.push({id:'list',action:'models.read'}); await h.tick();
+  const list = h.events.find(event => event.id === 'list');
+  assert.equal(list.modelOption,'sonnet');
+  assert.equal(list.model,'resolved-opus');
+});
+test("a changed alias remains selected when the provider model does not change", async () => {
+  const h = await harness(); await h.emit('session.start');
+  h.pinResolvedModel('resolved-opus');
+  h.commands.push({id:'switch',action:'model.set',model:'sonnet'}); await h.tick();
+  const switched = h.events.find(event => event.id === 'switch');
+  assert.equal(switched.kind,'models-returned');
+  assert.equal(switched.modelOption,'sonnet');
+  assert.equal(switched.model,'resolved-opus');
+  assert.equal(h.modelWrites(),1);
+});
+test("a custom alias remains selected when it resolves to a different provider model family", async () => {
+  const h = await harness(); await h.emit('session.start');
+  h.setResolvedModels({opus:'claude-opus-4-8[1M]',sonnet:'claude-opus-4-7'});
+  h.commands.push({id:'switch',action:'model.set',model:'sonnet'}); await h.tick();
+  const switched = h.events.find(event => event.id === 'switch');
+  assert.equal(switched.kind,'models-returned');
+  assert.equal(switched.modelOption,'sonnet');
+  assert.equal(switched.model,'claude-opus-4-7');
+  assert.equal(h.modelWrites(),1);
 });
  test("locked or denied native model settings never report switch success", async () => {
   for (const mode of ['locked','denied']) {

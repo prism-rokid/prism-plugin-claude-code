@@ -19,11 +19,32 @@ async function request($, path, body) {
   return response.text ? JSON.parse(response.text) : {};
 }
 
+const configuredModelOption = async ($, options) => {
+  const cwd = String(await $.session.cwd() || '').replace(/\/+$/, '');
+  const home = String(await $.env.get('HOME') || '').replace(/\/+$/, '');
+  const paths = [
+    cwd && `${cwd}/.claude/settings.local.json`,
+    cwd && `${cwd}/.claude/settings.json`,
+    home && `${home}/.claude/settings.local.json`,
+    home && `${home}/.claude/settings.json`,
+  ].filter(Boolean);
+  for (const path of paths) {
+    try {
+      const settings = JSON.parse(await $.fs.read(path));
+      if (typeof settings.model === 'string' && options.includes(settings.model)) return settings.model;
+    } catch {}
+  }
+  return '';
+};
+
 const readModels = async ($) => {
-    const row = (await $.config.list()).find(row => row.key === 'model');
-    if (!row || !Array.isArray(row.options)) throw new Error('native_model_options_unavailable');
-    return { model: await $.session.model(), modelOptions: row.options, modelLocked: row.isLocked === true };
-  };
+  const row = (await $.config.list()).find(row => row.key === 'model');
+  if (!row || !Array.isArray(row.options)) throw new Error('native_model_options_unavailable');
+  const modelOption = typeof row.value === 'string' && row.options.includes(row.value)
+    ? row.value
+    : await configuredModelOption($, row.options);
+  return { model: await $.session.model(), modelOption, modelOptions: row.options, modelLocked: row.isLocked === true };
+};
 
 export function register(on) {
   let activeTurnId;
@@ -70,6 +91,10 @@ export function register(on) {
                 if (!before.modelOptions.includes(command.model)) throw new Error('invalid_model_option');
                 const result = await $.config.set({key:'model',value:command.model});
                 if (result.deny) throw new Error(result.deny);
+                const after = await readModels($);
+                if (after.modelOption !== command.model) {
+                  throw new Error('model_switch_not_reflected');
+                }
               }
               await request($, '/event', {kind:'models-returned', id:command.id, sessionId:state.sessionId, ...await readModels($)});
             } catch (error) {

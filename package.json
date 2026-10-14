@@ -1,7 +1,7 @@
 {
   "name": "claude-code-plugin",
   "private": true,
-  "version": "0.3.5",
+  "version": "0.3.8",
   "description": "Prism controls for native Claude Code sessions via Claude Code Mods",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,7 @@
     "test": "npm run build && node --test dist/test/**/*.test.js"
   },
   "dependencies": {
-    "@rokid-prism/pluginbridge-plugin-sdk": "file:vendor/rokid-prism-pluginbridge-plugin-sdk-0.1.3.tgz",
+    "@rokid-prism/pluginbridge-plugin-sdk": "file:vendor/rokid-prism-pluginbridge-plugin-sdk-0.1.4.tgz",
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
