@@ -95,10 +95,5 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        # A moved tag or a rerun must rebuild the release instead of failing
-        # on the stale one; the artifacts are regenerated either way.
-        run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release delete "$GITHUB_REF_NAME" --yes
-          fi
-          gh release create "$GITHUB_REF_NAME" release-artifacts/* --title "$GITHUB_REF_NAME" --generate-notes
+        # Published tags and assets are immutable; use a new version for changes.
+        run: gh release create "$GITHUB_REF_NAME" release-artifacts/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

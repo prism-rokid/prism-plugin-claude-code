@@ -15,6 +15,6 @@ const assets = await Promise.all(names.map(async (name) => {
   const match = name.match(new RegExp(`^${id}-${version}-(macos-arm64|macos-x64|windows-x64|linux-x64)\\.tar\\.gz$`));
   if (!match) throw new Error(`invalid artifact name: ${name}`);
   const bytes = await readFile(resolve(artifacts, name));
-  return { target: match[1], filename: name, sha256: createHash("sha256").update(bytes).digest("hex"), supported: true };
+  return { platform: match[1], filename: name, sha256: createHash("sha256").update(bytes).digest("hex"), size_bytes: bytes.length };
 }));
-await writeFile(resolve(artifacts, "plugin-release.json"), JSON.stringify({ schema_version: 1, plugin_id: id, version, release_tag: `v${version}`, channel: "stable", plugin_protocol_version: protocolVersion, min_hub_version: minHubVersion, supported_platforms: assets.map((asset) => asset.target), assets }, null, 2) + "\n");
+await writeFile(resolve(artifacts, "plugin-release.json"), JSON.stringify({ schema_version: 1, plugin_id: id, version, channel: "stable", plugin_protocol_version: protocolVersion, min_hub_version: minHubVersion, assets }, null, 2) + "\n");
