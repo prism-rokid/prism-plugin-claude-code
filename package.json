@@ -1,7 +1,7 @@
 {
   "name": "claude-code-plugin",
   "private": true,
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "Prism controls for native Claude Code sessions via Claude Code Mods",
   "type": "module",
   "main": "dist/index.js",

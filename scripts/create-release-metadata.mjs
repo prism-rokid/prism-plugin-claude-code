@@ -17,4 +17,4 @@ const assets = await Promise.all(names.map(async (name) => {
   const bytes = await readFile(resolve(artifacts, name));
   return { platform: match[1], filename: name, sha256: createHash("sha256").update(bytes).digest("hex"), size_bytes: bytes.length };
 }));
-await writeFile(resolve(artifacts, "plugin-release.json"), JSON.stringify({ schema_version: 1, plugin_id: id, version, channel: "stable", plugin_protocol_version: protocolVersion, min_hub_version: minHubVersion, assets }, null, 2) + "\n");
+await writeFile(resolve(artifacts, "plugin-release.json"), JSON.stringify({ schema_version: 1, plugin_id: id, version, channel: "stable", plugin_protocol_version: protocolVersion, min_hub_version: minHubVersion, supported_platforms: assets.map((asset) => asset.platform), assets }, null, 2) + "\n");
