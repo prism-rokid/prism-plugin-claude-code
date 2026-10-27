@@ -9,10 +9,10 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const action = process.argv[2] || "install";
 const resolvedCLI = resolveClaudeCLI();
 const cli = resolvedCLI.command;
-const home = process.env.HOME || process.env.USERPROFILE || (process.env.HOMEDRIVE && process.env.HOMEPATH ? join(process.env.HOMEDRIVE, process.env.HOMEPATH) : "");
-if (!home) throw new Error("Could not resolve the user home directory");
+const home = resolvedCLI.env.HOME || "";
+if (!home) throw new Error("找不到 Claude Code 用户目录；请检查 USERPROFILE 或设置 PRISM_CLAUDE_USER_HOME。");
 const configDir = process.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
-const stateDir = join(home, ".prism", "claudecode");
+const stateDir = process.env.PRISM_CLAUDE_MOD_STATE_DIR || join(home, ".prism", "claudecode");
 const marketplaceDir = join(stateDir, "mod-marketplace");
 const pluginSource = join(marketplaceDir, "plugins", "prism-terminal-control");
 const marketplaceName = "prism-local";
@@ -25,7 +25,7 @@ const sourceLine = '[[ -f "$HOME/.prism/claudecode/claude-shell.zsh" ]] && sourc
 const marker = "# Prism-managed interactive Claude in Terminal.app and zsh-based IDE terminals.";
 
 function run(args) {
-  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...resolvedCLI.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe" });
+  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...resolvedCLI.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe", shell: process.platform === "win32" && /\.cmd$/i.test(cli) });
   return { status: result.status, error: result.error, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 function report(result, label) {
@@ -59,6 +59,7 @@ async function removeOldShellIntegration() {
   if (after !== before) await writeFile(zshrc, after, { mode: statSync(zshrc).mode & 0o777 });
 }
 function shellQuote(value) { return `'${value.replaceAll("'", `'"'"'`)}'`; }
+function hookQuote(value) { return process.platform === "win32" ? `"${value}"` : shellQuote(value); }
 
 if (action === "uninstall") {
   assertMarketplaceOwned();
@@ -89,7 +90,7 @@ await cp(join(root, "mod"), stage, { recursive: true });
 const hooksPath = join(stage, "hooks", "hooks.json");
 const hooks = JSON.parse(await readFile(hooksPath, "utf8"));
 for (const group of hooks.hooks?.PermissionRequest || []) for (const hook of group.hooks || []) {
-  if (hook.type === "command") hook.command = `${shellQuote(process.execPath)} "\${CLAUDE_PLUGIN_ROOT}/hooks/permission-request.mjs"`;
+  if (hook.type === "command") hook.command = `${hookQuote(process.execPath)} ${hookQuote(join(pluginSource, "hooks", "permission-request.mjs"))}`;
 }
 await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n", { mode: 0o600 });
 const marketplaceFile = join(marketplaceDir, ".claude-plugin", "marketplace.json");

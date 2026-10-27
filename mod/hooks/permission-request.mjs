@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const home = process.env.HOME || process.env.USERPROFILE;
+const home = process.env.PRISM_CLAUDE_USER_HOME || (process.platform === "win32" ? process.env.USERPROFILE || process.env.HOME : process.env.HOME || process.env.USERPROFILE);
 if (!home) process.exit(0);
 const chunks = [];
 let bytes = 0;
@@ -14,7 +14,8 @@ for await (const chunk of process.stdin) {
 const input = Buffer.concat(chunks).toString("utf8");
 try {
   const hook = JSON.parse(input);
-  const descriptor = JSON.parse(await readFile(join(home, ".prism", "claudecode", "mod-bridge.json"), "utf8"));
+  const stateDir = process.env.PRISM_CLAUDE_MOD_STATE_DIR || join(home, ".prism", "claudecode");
+  const descriptor = JSON.parse(await readFile(join(stateDir, "mod-bridge.json"), "utf8"));
   const response = await fetch(`http://127.0.0.1:${descriptor.port}/permission`, {
     method: "POST",
     headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },

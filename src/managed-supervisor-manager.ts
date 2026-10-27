@@ -3,12 +3,12 @@ import { resolveClaudeCLI } from "./claude-cli.js";
 /** Discovers or starts per-session detached Claude PTY supervisors. */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { ManagedSupervisorClient } from "./managed-supervisor-client.js";
 import type { TerminalSnapshot } from "./native-terminal-state.js";
+import { claudeUserHome } from "./user-home.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -16,7 +16,7 @@ export class ManagedSupervisorManager {
   readonly baseDir: string;
   private clients = new Map<string, ManagedSupervisorClient>();
   constructor(
-    baseDir = process.env.PRISM_CLAUDE_MANAGED_DIR || join(homedir(), ".prism", "claudecode", "managed"),
+    baseDir = process.env.PRISM_CLAUDE_MANAGED_DIR || join(claudeUserHome(), ".prism", "claudecode", "managed"),
     private readonly onState?: (sessionID: string, state: TerminalSnapshot) => void,
     private readonly onHook?: (sessionID: string, hook: Record<string, unknown>, eventID?: string, replayed?: boolean, createdAt?: string) => void,
   ) {

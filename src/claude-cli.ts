@@ -1,9 +1,9 @@
 import { accessSync, constants, readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { claudeUserHome } from "./user-home.js";
 
 /** Resolve without executing shell startup files, which may prompt or change user state. */
-export function resolveClaudeCLI(env: NodeJS.ProcessEnv = process.env, home = env.HOME || env.USERPROFILE || homedir()): { command: string; env: NodeJS.ProcessEnv } {
+export function resolveClaudeCLI(env: NodeJS.ProcessEnv = process.env, home = claudeUserHome(env)): { command: string; env: NodeJS.ProcessEnv } {
   const names = process.platform === "win32" ? ["claude.exe", "claude.cmd", "claude"] : ["claude"];
   const executable = (path: string) => { try { accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK); return statSync(path).isFile(); } catch { return false; } };
   const inPath = (name: string) => (env.PATH || "").split(delimiter).filter(Boolean).map(dir => join(dir, name)).find(executable);
@@ -38,5 +38,5 @@ export function resolveClaudeCLI(env: NodeJS.ProcessEnv = process.env, home = en
   command ||= "claude";
   // npm CLIs use /usr/bin/env node. Supply the Hub runtime when a GUI PATH has no Node.
   const path = [...new Set([...(isAbsolute(command) ? [dirname(command)] : []), dirname(process.execPath), ...(env.PATH || "").split(delimiter).filter(Boolean)])].join(delimiter);
-  return { command, env: { ...env, PATH: path, PRISM_CLAUDE_CLI: command } };
+  return { command, env: { ...env, HOME: home, ...(process.platform === "win32" ? { USERPROFILE: env.USERPROFILE || home } : {}), PATH: path, PRISM_CLAUDE_CLI: command } };
 }

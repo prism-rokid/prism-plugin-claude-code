@@ -19,6 +19,12 @@ const SURFACE = "claudecode-native-mod";
 const CONFIRM_TIMEOUT_MS = 10_000;
 const PLUGIN_ROOT = fileURLToPath(new URL("..", import.meta.url));
 function now(): string { return new Date().toISOString(); }
+function modUnavailableReason(detail: string): string {
+  if (process.platform !== "win32") return detail;
+  if (/disabled/i.test(detail)) return "Claude Code Mod 已禁用；请在 Claude Code 中启用 Prism Mod。";
+  if (/home|USERPROFILE|用户目录/i.test(detail)) return "找不到 Claude Code 用户目录；请检查 USERPROFILE。";
+  return "Claude Code Mod 未就绪；请检查安装或重新安装插件。";
+}
 function canonicalCwd(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
 function conversationTitle(value: string | undefined): string {
   return value?.replace(/\s+/g, " ").trim().slice(0, 100) || "Claude Code";
@@ -72,7 +78,7 @@ export class ModClaudeAdapter implements PluginAdapter {
   id(): string { return PLUGIN_ID; }
   async probe(): Promise<Capability> {
     const cli = resolveClaudeCLI();
-    const check = spawnSync(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env });
+    const check = spawnSync(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env, shell: process.platform === "win32" && /\.cmd$/i.test(cli.command) });
     const match = check.stdout?.match(/(\d+)\.(\d+)\.(\d+)/);
     const tuple = match?.slice(1).map(Number);
     const supported = Boolean(tuple && (tuple[0] > 2 || tuple[0] === 2 && (tuple[1] > 1 || tuple[1] === 1 && tuple[2] >= 287)));
@@ -88,7 +94,10 @@ export class ModClaudeAdapter implements PluginAdapter {
       CanForwardSync: canControl, CanReverseSync: canControl, CanPluginWideWatch: canControl,
       CanWaitRun: canControl, CanReadStatus: canControl, CanControlSession: canControl, CanOpenManagedTerminal: canControl,
       IntegrationMode: "protocol-native", VisibilitySurface: SURFACE,
-      UnavailableReason: available ? "" : this.modInstallError || `Claude Code 2.1.287+ with Mods is required: ${check.error?.message || check.stderr || check.stdout || "version check failed"}`,
+      UnavailableReason: available ? "" : this.modInstallError
+        ? modUnavailableReason(this.modInstallError)
+        : process.platform === "win32" ? "找不到 Claude Code 2.1.287+；请安装 CLI 或检查 PRISM_CLAUDE_CLI。"
+          : `Claude Code 2.1.287+ with Mods is required: ${check.error?.message || check.stderr || check.stdout || "version check failed"}`,
     };
   }
   async discover(): Promise<DiscoveryResult> {
@@ -588,7 +597,7 @@ export class ModClaudeAdapter implements PluginAdapter {
       }
       await this.modReady;
     }
-    catch (error) { throw new PluginAdapterError("mod_unavailable", this.modInstallError || (error instanceof Error ? error.message : String(error))); }
+    catch (error) { throw new PluginAdapterError("mod_unavailable", modUnavailableReason(this.modInstallError || (error instanceof Error ? error.message : String(error)))); }
   }
   private deliveryLedger(id: string): PersistentDeliveryLedger {
     let ledger = this.deliveryLedgers.get(id);

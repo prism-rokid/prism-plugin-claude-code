@@ -20,6 +20,11 @@ node scripts/install-mod.mjs uninstall
 
 Mod 使用带随机凭据的本机回环连接，连接描述文件仅允许当前用户读取。Hub 或插件断线时，Claude 原生终端仍可使用；恢复连接后重新握手。关闭 Hooks、禁用该 Mod、安全模式或项目信任尚未确认时，Prism 不会使用另一条写入路径绕过限制。
 
+Windows 上插件优先使用 `USERPROFILE` 作为用户目录，并向 Claude 子进程传入一致的
+`HOME`。特殊安装可设置 `PRISM_CLAUDE_USER_HOME`；Mod 桥接目录可用
+`PRISM_CLAUDE_MOD_STATE_DIR` 指定。权限 hook 使用已安装文件的绝对路径，
+避免依赖 Unix 风格的 shell 变量展开。
+
 ## 会话和输入
 
 - 手动启动的原生 Claude 会话通过 Mod 注册；历史和会话名称来自本地 Claude transcript 文件。

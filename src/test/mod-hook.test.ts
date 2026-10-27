@@ -25,7 +25,7 @@ async function harness(initiallyOnline = true, descriptorPath?: string) {
   let modelWrites = 0;
   let deferred: Promise<any> | undefined;
   const api = {
-    env: { get: async () => "/isolated-home" },
+    env: { get: async (key: string) => key === "HOME" ? "/isolated-home" : "" },
     fs: { read: async (path: string) => {
       if (settings[path]) return JSON.stringify({model:settings[path]});
       if (!online) throw new Error("Hub is not running");

@@ -1,8 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeUserHome } from "./user-home.js";
 
 export type ModSession = {
   session_id: string;
@@ -40,7 +40,7 @@ export class ModBridge {
   private listeners = new Set<(event: ModEvent) => void>();
   private descriptor?: { version: 1; instance_id: string; port: number; token: string };
 
-  constructor(readonly stateDir = process.env.PRISM_CLAUDE_MOD_STATE_DIR || join(homedir(), ".prism", "claudecode")) {
+  constructor(readonly stateDir = process.env.PRISM_CLAUDE_MOD_STATE_DIR || join(claudeUserHome(), ".prism", "claudecode")) {
     this.descriptorPath = join(stateDir, "mod-bridge.json");
   }
 

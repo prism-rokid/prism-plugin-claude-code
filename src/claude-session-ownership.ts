@@ -1,11 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeUserHome } from "./user-home.js";
 
 export type ClaudeSessionOwner = { state: "active"; pid: number } | { state: "inactive" } | { state: "unknown" };
 
 /** Check Claude's live-session registry before resuming a transcript. */
-export function claudeSessionOwner(sessionID: string, registryDir = join(homedir(), ".claude", "sessions")): ClaudeSessionOwner {
+export function claudeSessionOwner(sessionID: string, registryDir = join(claudeUserHome(), ".claude", "sessions")): ClaudeSessionOwner {
   let files: string[];
   try { files = readdirSync(registryDir).filter((name) => name.endsWith(".json")); }
   catch { return { state: "unknown" }; }
@@ -28,7 +28,7 @@ export function claudeSessionOwner(sessionID: string, registryDir = join(homedir
 }
 
 /** Compatibility helper for discovery metadata and callers needing only a live PID. */
-export function activeClaudeSessionPID(sessionID: string, registryDir = join(homedir(), ".claude", "sessions")): number | null {
+export function activeClaudeSessionPID(sessionID: string, registryDir = join(claudeUserHome(), ".claude", "sessions")): number | null {
   const owner = claudeSessionOwner(sessionID, registryDir);
   return owner.state === "active" ? owner.pid : null;
 }

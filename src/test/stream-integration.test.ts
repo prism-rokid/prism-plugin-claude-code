@@ -21,7 +21,7 @@ const user={type:'user',uuid:'user',timestamp:new Date().toISOString(),message:{
 await writeFile(file,JSON.stringify(user)+'\\n');
 const adapter=new ModClaudeAdapter();
 const hooks=new Map(); register((name,hook)=>hooks.set(name,hook));
-const api={env:{get:async()=>process.env.HOME},fs:{read:async(path)=>readFile(path,'utf8')},
+const api={env:{get:async(key)=>process.env[key] || ''},fs:{read:async(path)=>readFile(path,'utf8')},
 http:{fetch:async(url,options)=>{const r=await fetch(url,options);return {ok:r.ok,status:r.status,text:await r.text()};}},
 session:{id:async()=>id,cwd:async()=>'/isolated',version:async()=>({version:'2.1.289'}),surfaces:async()=>['terminal']},
 clock:{every:()=>{}},ui:{status:()=>{}}};

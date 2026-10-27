@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeUserHome } from "./user-home.js";
 
 export type NativeSessionSummary = { sessionId: string; title: string; cwd: string; updatedAt: string };
 export type TranscriptEntry = {
@@ -85,7 +85,7 @@ export class NativeTranscriptReader {
   private knownFiles = new Map<string, TranscriptFile>();
 
   constructor(options: { configDir?: string } = {}) {
-    this.configDir = options.configDir || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    this.configDir = options.configDir || process.env.CLAUDE_CONFIG_DIR || join(claudeUserHome(), ".claude");
   }
 
   async listSessions(): Promise<NativeSessionSummary[]> {

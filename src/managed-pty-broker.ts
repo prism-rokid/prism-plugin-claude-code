@@ -92,9 +92,13 @@ export class ManagedPtyBroker {
   launch(): void {
     if (this.pty) return;
     const spawner = this.options.spawner ?? ((command, args, opts) => spawnPty(command, args, opts) as IPty);
-    // A stable session ID is explicit. We never use --resume here: an attach
-    // request must only connect to an already-owned PTY broker.
-    this.pty = spawner(this.options.cliPath, [this.options.resumeSession ? "--resume" : "--session-id", this.sessionID, "--permission-mode", "default"], {
+    const cliArgs = [this.options.resumeSession ? "--resume" : "--session-id", this.sessionID, "--permission-mode", "default"];
+    const isWindowsScript = this.platform === "win32" && /\.(cmd|bat)$/i.test(this.options.cliPath);
+    const command = isWindowsScript ? process.env.ComSpec || "cmd.exe" : this.options.cliPath;
+    const args = isWindowsScript
+      ? ["/d", "/s", "/c", `""${this.options.cliPath}" ${cliArgs.join(" ")}"`]
+      : cliArgs;
+    this.pty = spawner(command, args, {
       name: "xterm-256color", cols: 100, rows: 32, cwd: this.options.cwd,
       env: { ...process.env, TERM: "xterm-256color" },
     });
@@ -140,7 +144,9 @@ export class ManagedPtyBroker {
       rejectAttach = reject;
       this.attachWaiter = { resolve, reject };
     });
-    const timeout = setTimeout(() => this.attachWaiter?.reject(new Error("native_terminal_attach_timeout")), this.options.attachTimeoutMs ?? 15_000);
+    const timeout = setTimeout(() => this.attachWaiter?.reject(new Error(this.platform === "win32"
+      ? "终端未能连接；请检查 Windows 桌面会话或安装 Windows Terminal。"
+      : "native_terminal_attach_timeout")), this.options.attachTimeoutMs ?? 15_000);
     let launcher: ChildProcess | undefined;
     let confirmed = false;
     try {
@@ -269,11 +275,28 @@ export class ManagedPtyBroker {
     } else {
       child = this.childSpawner("x-terminal-emulator", ["-e", this.executablePath, this.options.helperPath, handoffFile], { detached: true, stdio: "ignore" });
     }
-    child.once("error", (error) => {
-      this.attachWaiter?.reject(error);
-      try { rmSync(handoffFile, { force: true }); } catch {}
-    });
-    child.once("exit", (code) => { if (code !== 0) this.attachWaiter?.reject(new Error(`native_terminal_launch_failed:${code ?? "unknown"}`)); });
+    const observe = (launcher: ChildProcess, allowFallback: boolean) => {
+      launcher.once("error", (error) => {
+        if (allowFallback && this.platform === "win32" && (error as NodeJS.ErrnoException).code === "ENOENT") {
+          try {
+            const fallback = this.childSpawner("cmd.exe", ["/d", "/s", "/c", `start "" "${this.executablePath}" "${this.options.helperPath}" "${handoffFile}"`], { detached: true, stdio: "ignore" });
+            observe(fallback, false);
+            fallback.unref();
+            return;
+          } catch {}
+        }
+        this.attachWaiter?.reject(this.platform === "win32"
+          ? new Error("无法打开 Windows 终端；请检查桌面会话或安装 Windows Terminal。")
+          : error);
+        try { rmSync(handoffFile, { force: true }); } catch {}
+      });
+      launcher.once("exit", (code) => {
+        if (code !== 0) this.attachWaiter?.reject(new Error(this.platform === "win32"
+          ? "无法打开 Windows 终端；请检查桌面会话或安装 Windows Terminal。"
+          : `native_terminal_launch_failed:${code ?? "unknown"}`));
+      });
+    };
+    observe(child, this.platform === "win32");
     child.unref();
     return child;
   }

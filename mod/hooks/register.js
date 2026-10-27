@@ -1,11 +1,14 @@
 const PLUGIN = 'prism-terminal-control';
-const DESCRIPTOR = '/.prism/claudecode/mod-bridge.json';
 const CLIENT_INSTANCE = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 async function descriptor($) {
-  const home = await $.env.get('HOME');
-  if (!home) throw new Error('HOME unavailable');
-  return JSON.parse(await $.fs.read(home + DESCRIPTOR));
+  const windows = await $.env.get('OS') === 'Windows_NT';
+  const home = await $.env.get('PRISM_CLAUDE_USER_HOME') || (windows
+    ? await $.env.get('USERPROFILE') || await $.env.get('HOME')
+    : await $.env.get('HOME') || await $.env.get('USERPROFILE'));
+  if (!home) throw new Error('找不到 Claude Code 用户目录；请检查 USERPROFILE。');
+  const stateDir = await $.env.get('PRISM_CLAUDE_MOD_STATE_DIR') || home + '/.prism/claudecode';
+  return JSON.parse(await $.fs.read(stateDir + '/mod-bridge.json'));
 }
 
 async function request($, path, body) {
