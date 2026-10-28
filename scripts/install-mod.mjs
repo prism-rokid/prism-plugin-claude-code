@@ -1,8 +1,7 @@
-import { resolveClaudeCLI } from "../dist/claude-cli.js";
+import { resolveClaudeCLI, runClaudeCLI } from "../dist/claude-cli.js";
 import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -25,7 +24,7 @@ const sourceLine = '[[ -f "$HOME/.prism/claudecode/claude-shell.zsh" ]] && sourc
 const marker = "# Prism-managed interactive Claude in Terminal.app and zsh-based IDE terminals.";
 
 function run(args) {
-  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...resolvedCLI.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe", shell: process.platform === "win32" && /\.cmd$/i.test(cli) });
+  const result = runClaudeCLI(cli, args, { encoding: "utf8", timeout: 30_000, env: { ...resolvedCLI.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "pipe" });
   return { status: result.status, error: result.error, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 function report(result, label) {

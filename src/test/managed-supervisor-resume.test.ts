@@ -1,9 +1,39 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { ManagedSupervisorManager } from "../managed-supervisor-manager.js";
+
+test("Windows supervisor exits after shutdown even when the ConPTY child already stopped", {skip:process.platform!=="win32"}, async()=>{
+  const root=mkdtempSync(join(tmpdir(),"prism supervisor shutdown "));
+  const previous=process.env.PRISM_CLAUDE_CLI;
+  const cli=join(root,"claude.cmd");
+  writeFileSync(cli,"@echo off\r\necho PRISM_SUPERVISOR_EXIT\r\n");
+  const manager=new ManagedSupervisorManager(join(root,"managed"));
+  let pid: number|undefined;
+  const alive=()=>{try{process.kill(pid!,0);return true;}catch{return false;}};
+  try{
+    process.env.PRISM_CLAUDE_CLI=cli;
+    const {sessionID,client}=await manager.create(root);
+    pid=client.descriptor.pid;
+    const stoppedDeadline=Date.now()+5000;
+    while(Date.now()<stoppedDeadline&&(await client.refresh()).status!=="stopped")await new Promise(r=>setTimeout(r,25));
+    assert.equal((await client.refresh()).status,"stopped");
+    await client.shutdown();
+    const deadline=Date.now()+5000;
+    while(Date.now()<deadline&&alive())await new Promise(r=>setTimeout(r,25));
+    assert.equal(alive(),false,"supervisor retained the ConPTY worker after shutdown");
+    assert.equal(manager.hasSafelyClosedState(sessionID),true);
+  }finally{
+    manager.close();
+    if(pid&&alive())process.kill(pid);
+    if(previous===undefined)delete process.env.PRISM_CLAUDE_CLI;else process.env.PRISM_CLAUDE_CLI=previous;
+    // Conhost can briefly retain the exited process's working directory.
+    await rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:50});
+  }
+});
 
 test("a cleanly closed panel PTY owner is resumed with the same native transcript", { skip: process.platform === "win32" ? "POSIX CLI fixture; Windows terminal acceptance is separate" : false }, async () => {
   const root = mkdtempSync(join(tmpdir(), "prism-mod-resume-"));

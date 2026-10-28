@@ -1,16 +1,34 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { ManagedPtyBroker, type ManagedPtyProcess } from "../managed-pty-broker.js";
+
+test("Windows real PTY runs a batch launcher in a path containing spaces", { skip: process.platform !== "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "prism real pty & "));
+  const cliPath = join(dir, "claude.cmd");
+  writeFileSync(cliPath, '@echo off\r\necho PRISM_REAL_PTY_%~2\r\n');
+  try {
+    // ConPTY's upstream output worker retains native handles after process exit;
+    // isolate it so this acceptance probe cannot keep the test runner alive.
+    const script = `import { ManagedPtyBroker } from ${JSON.stringify(new URL("../managed-pty-broker.js", import.meta.url).href)};
+      let output=""; const broker=new ManagedPtyBroker({sessionID:"pty-test",cwd:process.argv[1],cliPath:process.argv[2],helperPath:"attach.js",dataDir:process.argv[1],onOutput:data=>{output+=data;}});
+      broker.launch(); broker.pty.onExit(({exitCode})=>{process.stdout.write(output);process.exit(exitCode);});`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script, dir, cliPath], {encoding:"utf8",timeout:10_000});
+    assert.equal(result.status,0,result.stderr);
+    assert.match(result.stdout, /PRISM_REAL_PTY_pty-test/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("Windows 的 claude.cmd 经系统命令解释器进入 PTY", async () => {
   const dir = mkdtempSync(join(tmpdir(), "prism-windows-pty-"));
-  const calls: Array<{ command: string; args: string[] }> = [];
+  const calls: Array<{ command: string; args: string[] | string }> = [];
   const listeners = new Set<(event: { exitCode: number }) => void>();
   const pty: ManagedPtyProcess = {
     pid: 1, write: () => {}, resize: () => {}, kill: () => { for (const listener of listeners) listener({ exitCode: 0 }); },
@@ -23,15 +41,14 @@ test("Windows 的 claude.cmd 经系统命令解释器进入 PTY", async () => {
   try {
     broker.launch();
     assert.equal(calls[0].command, process.env.ComSpec || "cmd.exe");
-    assert.deepEqual(calls[0].args.slice(0, 3), ["/d", "/s", "/c"]);
-    assert.equal(calls[0].args[3], '""C:\\Program Files\\Claude\\claude.cmd" --session-id session-one --permission-mode default"');
+    assert.equal(calls[0].args, '/d /s /c ""C:\\Program Files\\Claude\\claude.cmd" --session-id session-one --permission-mode default"');
   } finally {
     await broker.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("Windows Terminal 缺失时使用系统控制台继续接入", async (t) => {
+for (const failure of ["missing", "nonzero"] as const) test(`Windows Terminal ${failure} falls back to the system console`, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "prism-windows-terminal-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const launches: Array<{ command: string; args: string[]; child: EventEmitter }> = [];
@@ -53,14 +70,34 @@ test("Windows Terminal 缺失时使用系统控制台继续接入", async (t) =>
   t.after(() => broker.close());
   const opening = broker.openManagedTerminal("windows-terminal");
   const handoff = JSON.parse(readFileSync(launches[0].args[3], "utf8")) as { host: string; port: number; token: string };
-  launches[0].child.emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }));
-  assert.equal(launches[1].command, "cmd.exe");
+  if (failure === "missing") launches[0].child.emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }));
+  else launches[0].child.emit("exit", 1);
+  assert.equal(launches[1].command, process.env.ComSpec || "cmd.exe");
   assert.match(launches[1].args[3], /start ""/);
   const socket = createConnection({ host: handoff.host, port: handoff.port });
   await new Promise<void>((resolve) => socket.once("connect", resolve));
   socket.write(JSON.stringify({ type: "auth", token: handoff.token }) + "\n");
   await opening;
   socket.destroy();
+});
+
+test("Windows fallback opens a real native console and attaches the production helper", {skip:process.platform!=="win32"}, async()=>{
+  const dir=mkdtempSync(join(tmpdir(),"prism native terminal & "));
+  const exits=new Set<(event:{exitCode:number})=>void>();
+  const pty: ManagedPtyProcess={pid:3,write(){},resize(){},kill(){for(const listener of exits)listener({exitCode:0});},onData:()=>({dispose(){}}),onExit(listener){exits.add(listener);return{dispose(){exits.delete(listener);}};}};
+  const broker=new ManagedPtyBroker({sessionID:"real-native-console",cwd:dir,cliPath:"claude.exe",dataDir:dir,
+    helperPath:fileURLToPath(new URL("../managed-terminal-client.js",import.meta.url)),spawner:()=>pty,attachTimeoutMs:10_000,
+    childSpawner:((command:string,args:string[],options:Parameters<typeof spawn>[2])=>{
+      if(command==="wt.exe"){
+        const child=Object.assign(new EventEmitter(),{unref(){},kill(){}});
+        process.nextTick(()=>child.emit("error",Object.assign(new Error("force classic console acceptance"),{code:"ENOENT"})));
+        return child as ChildProcess;
+      }
+      return spawn(command,args,options);
+    }) as typeof spawn,
+  });
+  try{await broker.start();await broker.openManagedTerminal("real-native-console");assert.equal(broker.snapshot().status,"attached");}
+  finally{await broker.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test("native attach preserves terminal input bytes through the PTY lifecycle broker", async (t) => {

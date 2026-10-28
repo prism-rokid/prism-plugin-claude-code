@@ -2,6 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ModClaudeAdapter } from "../mod-adapter.js";
 
+test("historical attach waits for the native Mod after the real terminal attaches", async()=>{
+  const calls:string[]=[];
+  const client={descriptor:{cwd:"/project"},refresh:async()=>({status:"detached"}),openTerminal:async()=>{calls.push("terminal");}};
+  const adapter={ensureModReady:async()=>{},bridge:{session:()=>undefined,waitForSession:async()=>{await new Promise(r=>setTimeout(r,20));calls.push("mod");}},connectOrResume:async()=>client};
+  const result=await ModClaudeAdapter.prototype.attachSession.call(adapter as any,{PluginID:"claudecode",NativeSessionID:"native",NativeThreadID:"native",Cwd:"/project"} as any);
+  assert.equal(result.NativeSessionID,"native");
+  assert.deepEqual(calls,["terminal","mod"]);
+});
+
+test("send reconnect waits on the existing managed writer without a second terminal attachment",async()=>{
+  let waits=0;
+  const client={refresh:async()=>({status:"attached"}),openTerminal:async()=>{throw new Error("must not attach twice");}};
+  const adapter={manager:{hasSupervisorOwner:()=>true},connectOrResume:async()=>client,bridge:{waitForSession:async()=>{waits++;}}};
+  await (ModClaudeAdapter.prototype as any).reconnectNativeSession.call(adapter,"native","/project");
+  assert.equal(waits,1);
+});
+
 test("conversation selection accepts native history without invoking model control or launching a process", async () => {
   const adapter = {bridge:{session: () => undefined, command: () => {throw new Error("must not mutate");}},reader:{sessionInfo: async (id: string) => id === "native" ? {sessionId:id} : undefined}};
   const invoke = (session: any, action = "conversation.select") => ModClaudeAdapter.prototype.controlSession.call(adapter as any, {session, action, metadata:{}});

@@ -21,7 +21,7 @@ export class ManagedSupervisor {
   private authorized = new WeakSet<Socket>();
   private closing = false;
 
-  constructor(private readonly options: Omit<ManagedPtyBrokerOptions, "onStateChanged">) {
+  constructor(private readonly options: Omit<ManagedPtyBrokerOptions, "onStateChanged">, private readonly onClosed: () => void = () => {}) {
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.descriptorPath = join(options.dataDir, "supervisor.json");
     this.broker = new ManagedPtyBroker({
@@ -51,12 +51,14 @@ export class ManagedSupervisor {
   }
 
   async close(): Promise<void> {
+    if (this.closing) return;
     this.closing = true;
     for (const socket of this.sockets) socket.destroy();
     if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
     await this.broker.close();
     try { rmSync(this.descriptorPath, { force: true }); } catch {}
     writeFileSync(join(this.options.dataDir, "closed.json"), JSON.stringify({ session_id: this.broker.sessionID, supervisor_pid: process.pid, closed_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    this.onClosed();
   }
 
   private accept(socket: Socket): void {
@@ -120,8 +122,14 @@ export class ManagedSupervisor {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const [sessionID, cwd, cliPath, helperPath, dataDir, launchMode] = process.argv.slice(2);
-  const supervisor = new ManagedSupervisor({ sessionID, cwd, cliPath, helperPath, dataDir, resumeSession: launchMode === "resume" });
-  supervisor.start().catch((error) => {
+  let started = false;
+  const supervisor = new ManagedSupervisor({ sessionID, cwd, cliPath, helperPath, dataDir, resumeSession: launchMode === "resume" }, () => {
+    // node-pty's Windows output worker can retain a native pipe after CLI exit.
+    // Once explicit shutdown has closed sockets and persisted the closed state,
+    // the standalone owner has no remaining work and must release that worker.
+    process.exit(started ? 0 : 1);
+  });
+  supervisor.start().then(() => { started = true; }).catch((error) => {
     process.stderr.write(`Prism Claude supervisor failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });

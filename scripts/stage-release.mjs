@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, readdir, readlink, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,13 @@ function includeRuntime(path) {
 for (const entry of await readdir(root)) {
   if (runtimeEntries.has(entry)) await cp(resolve(root, entry), resolve(destination, entry), { recursive: true, filter: includeRuntime });
 }
+// Hub also accepts a prebuilt directory through source-install. Its npm setup
+// runs a declared build script, so never ship source-only scripts that delete
+// the compiled entrypoint before looking for an absent tsconfig/src tree.
+const packagePath = resolve(destination, "package.json");
+const runtimePackage = JSON.parse(await readFile(packagePath, "utf8"));
+runtimePackage.scripts = Object.fromEntries(Object.entries(runtimePackage.scripts || {}).filter(([name]) => name === "postinstall"));
+await writeFile(packagePath, JSON.stringify(runtimePackage, null, 2) + "\n");
 
 // npm creates node_modules/.bin shims as absolute symlinks that resolve
 // against the build machine's source tree. Archived verbatim they dangle on

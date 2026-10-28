@@ -92,7 +92,7 @@ export class ManagedSupervisorManager {
     const helper = fileURLToPath(new URL("./managed-terminal-client.js", import.meta.url));
     const cli = resolveClaudeCLI();
     const child = spawn(process.execPath, [supervisor, sessionID, cwd, cli.command, helper, dataDir, resume ? "resume" : "new"], {
-      detached: true, stdio: "ignore", cwd, env: cli.env,
+      detached: true, windowsHide: true, stdio: "ignore", cwd, env: cli.env,
     });
     let spawnError: Error | undefined;
     child.once("error", (error) => { spawnError = error; });

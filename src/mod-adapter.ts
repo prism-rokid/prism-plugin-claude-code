@@ -1,4 +1,4 @@
-import { resolveClaudeCLI } from "./claude-cli.js";
+import { resolveClaudeCLI, runClaudeCLI } from "./claude-cli.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, watch } from "node:fs";
 import { join, resolve } from "node:path";
@@ -78,7 +78,7 @@ export class ModClaudeAdapter implements PluginAdapter {
   id(): string { return PLUGIN_ID; }
   async probe(): Promise<Capability> {
     const cli = resolveClaudeCLI();
-    const check = spawnSync(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env, shell: process.platform === "win32" && /\.cmd$/i.test(cli.command) });
+    const check = runClaudeCLI(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env });
     const match = check.stdout?.match(/(\d+)\.(\d+)\.(\d+)/);
     const tuple = match?.slice(1).map(Number);
     const supported = Boolean(tuple && (tuple[0] > 2 || tuple[0] === 2 && (tuple[1] > 1 || tuple[1] === 1 && tuple[2] >= 287)));
@@ -189,6 +189,10 @@ export class ModClaudeAdapter implements PluginAdapter {
     const terminal = await client.refresh();
     if (terminal.status === "stopped") throw new PluginAdapterError("native_session_stopped", "Claude Code session has stopped");
     if (terminal.status !== "attached") await client.openTerminal(id);
+    // A terminal attachment only proves the helper is connected. Claude may
+    // still be loading its Mod; do not let the following Hub send race startup.
+    try { await this.bridge.waitForSession(id, CONFIRM_TIMEOUT_MS); }
+    catch { throw new PluginAdapterError("mod_session_not_connected", "Claude terminal attached but its Mod did not connect before timeout"); }
     return session(id, client.descriptor.cwd);
   }
   async openManagedTerminal(req: ManagedTerminalRequest): Promise<{ ok: boolean; message: string }> {
@@ -616,6 +620,16 @@ export class ModClaudeAdapter implements PluginAdapter {
     if ((await client.refresh()).status === "detached") await client.openTerminal(id);
   }
   private async reconnectNativeSession(id: string, cwd: string): Promise<void> {
+    if (this.manager.hasSupervisorOwner(id)) {
+      // Reuse the managed writer and its attached console while the Mod starts
+      // or reconnects. Opening another helper would fail or steal attachment.
+      try {
+        const client = await this.connectOrResume(id, cwd);
+        if ((await client.refresh()).status !== "attached") await client.openTerminal(id);
+        await this.bridge.waitForSession(id, CONFIRM_TIMEOUT_MS);
+        return;
+      } catch (error) { throw new PluginAdapterError("mod_session_not_connected", error instanceof Error ? error.message : String(error)); }
+    }
     const owner = claudeSessionOwner(id, join(this.reader.configDir, "sessions"));
     if (owner.state === "active") throw new PluginAdapterError("mod_session_not_connected", "This Claude process is still active but has no Mod heartbeat; reopen it once with the installed Mod before remote control");
     if (owner.state === "unknown") throw new PluginAdapterError("mod_session_owner_uncertain", "Claude's live-session registry is unavailable; refusing to create a second writer");
@@ -627,7 +641,7 @@ export class ModClaudeAdapter implements PluginAdapter {
     let client: ManagedSupervisorClient;
     try {
       client = await this.connectOrResume(id, cwd);
-      await client.openTerminal(id);
+      if ((await client.refresh()).status !== "attached") await client.openTerminal(id);
       await this.bridge.waitForSession(id, CONFIRM_TIMEOUT_MS);
     } catch (error) {
       throw new PluginAdapterError("mod_session_not_connected", error instanceof Error ? error.message : String(error));

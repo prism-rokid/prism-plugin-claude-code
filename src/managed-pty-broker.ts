@@ -21,7 +21,7 @@ export interface ManagedPtyProcess {
 
 export type ManagedPtySpawner = (
   command: string,
-  args: string[],
+  args: string[] | string,
   options: { name: string; cols: number; rows: number; cwd: string; env: NodeJS.ProcessEnv },
 ) => ManagedPtyProcess;
 
@@ -96,7 +96,9 @@ export class ManagedPtyBroker {
     const isWindowsScript = this.platform === "win32" && /\.(cmd|bat)$/i.test(this.options.cliPath);
     const command = isWindowsScript ? process.env.ComSpec || "cmd.exe" : this.options.cliPath;
     const args = isWindowsScript
-      ? ["/d", "/s", "/c", `""${this.options.cliPath}" ${cliArgs.join(" ")}"`]
+      // node-pty escapes an argv array with CRT rules, which cmd.exe does not
+      // use. Pass its native command line verbatim to preserve batch paths.
+      ? `/d /s /c ""${this.options.cliPath}" ${cliArgs.join(" ")}"`
       : cliArgs;
     this.pty = spawner(command, args, {
       name: "xterm-256color", cols: 100, rows: 32, cwd: this.options.cwd,
@@ -276,21 +278,29 @@ export class ManagedPtyBroker {
       child = this.childSpawner("x-terminal-emulator", ["-e", this.executablePath, this.options.helperPath, handoffFile], { detached: true, stdio: "ignore" });
     }
     const observe = (launcher: ChildProcess, allowFallback: boolean) => {
+      let fallbackStarted = false;
+      const fallback = () => {
+        if (!allowFallback || this.platform !== "win32" || fallbackStarted || !this.attachWaiter) return false;
+        fallbackStarted = true;
+        // cmd uses its own quoting rules. Node's default CRT argv escaping
+        // inserts backslashes into this start command and prevents attachment.
+        const commandLine = `"start "" "${this.executablePath}" "${this.options.helperPath}" "${handoffFile}""`;
+        const child = this.childSpawner(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", commandLine], {
+          detached: true, stdio: "ignore", windowsVerbatimArguments: true, windowsHide: true,
+        });
+        observe(child, false);
+        child.unref();
+        return true;
+      };
       launcher.once("error", (error) => {
-        if (allowFallback && this.platform === "win32" && (error as NodeJS.ErrnoException).code === "ENOENT") {
-          try {
-            const fallback = this.childSpawner("cmd.exe", ["/d", "/s", "/c", `start "" "${this.executablePath}" "${this.options.helperPath}" "${handoffFile}"`], { detached: true, stdio: "ignore" });
-            observe(fallback, false);
-            fallback.unref();
-            return;
-          } catch {}
-        }
+        try { if (fallback()) return; } catch {}
         this.attachWaiter?.reject(this.platform === "win32"
           ? new Error("无法打开 Windows 终端；请检查桌面会话或安装 Windows Terminal。")
           : error);
         try { rmSync(handoffFile, { force: true }); } catch {}
       });
       launcher.once("exit", (code) => {
+        if (code !== 0) { try { if (fallback()) return; } catch {} }
         if (code !== 0) this.attachWaiter?.reject(new Error(this.platform === "win32"
           ? "无法打开 Windows 终端；请检查桌面会话或安装 Windows Terminal。"
           : `native_terminal_launch_failed:${code ?? "unknown"}`));

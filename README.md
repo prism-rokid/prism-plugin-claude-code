@@ -25,6 +25,23 @@ Windows 上插件优先使用 `USERPROFILE` 作为用户目录，并向 Claude �
 `PRISM_CLAUDE_MOD_STATE_DIR` 指定。权限 hook 使用已安装文件的绝对路径，
 避免依赖 Unix 风格的 shell 变量展开。
 
+Windows 桌面启动时也会探测 `%APPDATA%\npm`、`NVM_SYMLINK`、`NVM_HOME`
+和 Volta 的安装目录；带空格的 `.cmd` 启动器可用于版本检测、Mod 安装和托管终端。
+通过 npm 安装 Claude Code 时，需要可用的 Git for Windows；特殊安装可通过
+`CLAUDE_CODE_GIT_BASH_PATH` 指定 `bash.exe`。
+
+使用 mise 时，插件支持标准 shim 目录、`MISE_DATA_DIR` 和 `MISE_SHIMS_DIR`；
+自定义目录可以位于任意磁盘。Windows shim 还需要可用的 mise 程序：可将 mise
+加入 Hub 的 PATH，或通过 `MISE_BIN` 指定其完整路径。shim 由 mise 根据当前目录
+选择版本，因此升级无需将插件固定到具体版本。显式 `PRISM_CLAUDE_CLI` 仍优先；
+如果以前将它设置为带版本号的路径，需要清除该覆盖才能使用自动发现。私有工具链
+若既没有可用的 mise 程序，也没有向 Hub 暴露目录或 PATH，则无法可靠自动发现。
+
+MiniMax 等兼容服务沿用 Claude 的环境变量，例如 `ANTHROPIC_BASE_URL`、
+`ANTHROPIC_AUTH_TOKEN` 和 `ANTHROPIC_MODEL`。Claude 使用 Anthropic 兼容端点
+（MiniMax 为 `/anthropic`），不能直接把 OpenAI 兼容的 `/v1` 地址用于 Claude。
+插件不会写入或转换用户的密钥配置。
+
 ## 会话和输入
 
 - 手动启动的原生 Claude 会话通过 Mod 注册；历史和会话名称来自本地 Claude transcript 文件。

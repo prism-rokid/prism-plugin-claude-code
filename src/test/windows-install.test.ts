@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 test("Windows 可通过 claude.cmd 安装 Mod 并生成本机 hook 路径", { skip: process.platform !== "win32" }, () => {
-  const home = mkdtempSync(join(tmpdir(), "prism-claude-windows-"));
+  const home = mkdtempSync(join(tmpdir(), "prism claude windows & "));
   try {
     const cli = join(home, "claude.cmd");
-    writeFileSync(cli, "@echo off\r\nif \"%1\"==\"--version\" echo 2.1.289\r\n");
+    writeFileSync(cli, "@echo off\r\nif \"%~1\"==\"--version\" echo 2.1.289\r\n");
     const installer = fileURLToPath(new URL("../../scripts/install-mod.mjs", import.meta.url));
     const result = spawnSync(process.execPath, [installer, "install"], {
       env: { ...process.env, HOME: home, USERPROFILE: home, PRISM_CLAUDE_CLI: cli, CLAUDE_CONFIG_DIR: join(home, ".claude") },
