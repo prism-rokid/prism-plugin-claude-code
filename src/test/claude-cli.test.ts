@@ -37,7 +37,7 @@ test("mise discovers custom shim and executable without pinning an installed ver
   const shim=join(custom,"custom shims",process.platform === "win32" ? "claude.cmd" : "claude"); cli(shim);
   const selection=join(custom,"selected-version.txt");
   writeFileSync(selection,"2.1.311\n");
-  writeFileSync(shim, process.platform === "win32" ? `@echo off\r\ntype "${selection}"\r\n` : `#!/bin/sh\ncat '${selection.replace(/'/g, "'\\''")}'\n`);
+  writeFileSync(shim, process.platform === "win32" ? `@echo off\r\ntype "${selection}"\r\n` : `#!/bin/sh\n/bin/cat '${selection.replace(/'/g, "'\\''")}'\n`);
   chmodSync(shim,0o700);
   const env={PATH:join(home,"empty"), MISE_DATA_DIR:join(custom,"data"), MISE_SHIMS_DIR:dirname(shim), MISE_BIN:mise};
   const first=resolveClaudeCLI(env,home);
