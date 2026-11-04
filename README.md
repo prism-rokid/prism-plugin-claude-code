@@ -4,6 +4,10 @@
 
 需要 Claude Code 2.1.287 或更新版本，以及 Hub 提供的 Node.js 22 插件运行时；终端用户无需额外安装一套 Node。沿用用户已有的 Claude 配置，包括 API Key、第三方兼容 API 地址和模型配置；不依赖 Claude 官方账户的远程同步服务。
 
+## 本地问题分析与贡献
+
+仓库默认带有 [`prism-plugin-maintainer`](.agents/skills/prism-plugin-maintainer/SKILL.md)，用于本地分析、修复和验证插件问题，无法解决时整理脱敏 Issue 草稿。支持 `.agents/skills` 的智能体可发现它，其他客户端可要求智能体直接阅读该文件。默认不发布；先准备 diff、检查结果、目标和正文供审阅，用户可一次授权 commit、推送与 PR 整条流程，或明确授权无法解决时自动提交 Issue。范围内已有授权不重复询问。公开提交和数据处理说明见 [SDK README](https://github.com/Rokid-Prism/prism-plugin-sdk#本地问题分析与贡献-skill)。
+
 ## 安装和迁移
 
 Hub 加载插件时自动安装或更新 `prism-terminal-control@prism-local` 用户级 Mod。无需用户给每次 `claude` 启动添加参数。桌面 Hub 会自动发现 PATH、Claude 原生安装目录、Homebrew 和 nvm 中的 CLI，不要求从终端启动 Hub。首次能力检测会安装 Mod；临时安装失败后可重试。普通终端和 zsh IDE 内置终端都继续运行原来的 `claude` 命令，`--resume` 等原生参数保持可用。不同 `CLAUDE_CONFIG_DIR` 的配置需要分别安装。
