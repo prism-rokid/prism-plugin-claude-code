@@ -1,3 +1,4 @@
+import { MOD_MINIMUM_CLAUDE_VERSION, MOD_PLUGIN_ID, MOD_INSTALL_FAILURE_FILE, modInstallFailure, parseClaudeVersion, supportsClaudeMods } from "../dist/mod-diagnostics.js";
 import { resolveClaudeCLI, runClaudeCLI } from "../dist/claude-cli.js";
 import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -16,10 +17,10 @@ const marketplaceDir = join(stateDir, "mod-marketplace");
 const pluginSource = join(marketplaceDir, "plugins", "prism-terminal-control");
 const marketplaceName = "prism-local";
 const pluginName = "prism-terminal-control";
-const pluginID = `${pluginName}@${marketplaceName}`;
-const settingsBefore = jsonFile(join(configDir, "settings.json"));
-const explicitlyDisabled = settingsBefore.enabledPlugins?.[pluginID] === false;
-const shouldEnable = settingsBefore.enabledPlugins?.[pluginID] === undefined;
+const pluginID = MOD_PLUGIN_ID;
+const failurePath = join(stateDir, MOD_INSTALL_FAILURE_FILE);
+let step = "files";
+let exitStatus;
 const sourceLine = '[[ -f "$HOME/.prism/claudecode/claude-shell.zsh" ]] && source "$HOME/.prism/claudecode/claude-shell.zsh"';
 const marker = "# Prism-managed interactive Claude in Terminal.app and zsh-based IDE terminals.";
 
@@ -29,8 +30,10 @@ function run(args) {
 }
 function report(result, label) {
   if (result.status === 0) return;
-  const detail = result.error?.message || result.stderr.trim() || `${label} exited ${result.status}`;
-  throw new Error(`${label}: ${detail}`);
+  step = label;
+  exitStatus = result.status;
+  if (result.error) throw result.error;
+  throw new Error("Claude CLI 命令失败");
 }
 function jsonFile(path) {
   try { return JSON.parse(requireText(path)); } catch (error) { if (error?.code === "ENOENT") return {}; throw error; }
@@ -60,80 +63,105 @@ async function removeOldShellIntegration() {
 function shellQuote(value) { return `'${value.replaceAll("'", `'"'"'`)}'`; }
 function hookQuote(value) { return process.platform === "win32" ? `"${value}"` : shellQuote(value); }
 
-if (action === "uninstall") {
-  assertMarketplaceOwned();
-  const installed = jsonFile(join(configDir, "plugins", "installed_plugins.json"));
-  const exists = Array.isArray(installed.plugins?.[pluginID]) && installed.plugins[pluginID].length > 0;
-  if (exists) report(run(["plugin", "uninstall", pluginID, "--scope", "user", "--yes"]), "Claude Mod uninstall");
-  const known = jsonFile(join(configDir, "plugins", "known_marketplaces.json"));
-  if (known[marketplaceName]) report(run(["plugin", "marketplace", "remove", marketplaceName]), "Prism marketplace removal");
-  await rm(marketplaceDir, { recursive: true, force: true });
-  await removeOldShellIntegration();
-  process.stdout.write("Claude Code Mod uninstalled; other Claude plugins and settings were kept.\n");
-  process.exit(0);
-}
-if (action !== "install" && action !== "update") throw new Error("usage: install-mod.mjs [install|update|uninstall]");
+async function main() {
+  if (action === "uninstall") {
+    assertMarketplaceOwned();
+    const installed = jsonFile(join(configDir, "plugins", "installed_plugins.json"));
+    const exists = Array.isArray(installed.plugins?.[pluginID]) && installed.plugins[pluginID].length > 0;
+    if (exists) report(run(["plugin", "uninstall", pluginID, "--scope", "user", "--yes"]), "plugin");
+    const known = jsonFile(join(configDir, "plugins", "known_marketplaces.json"));
+    if (known[marketplaceName]) report(run(["plugin", "marketplace", "remove", marketplaceName]), "marketplace");
+    await rm(marketplaceDir, { recursive: true, force: true });
+    await removeOldShellIntegration();
+    process.stdout.write("Claude Code Mod 已卸载。\n");
+    await rm(failurePath, { force: true });
+    return;
+  }
+  if (action !== "install" && action !== "update") throw new Error("usage: install-mod.mjs [install|update|uninstall]");
 
-const version = run(["--version"]);
-report(version, "Claude Code version check");
-const parsedVersion = version.stdout.match(/(\d+)\.(\d+)\.(\d+)/);
-if (!parsedVersion || Number(parsedVersion[1]) < 2 || (Number(parsedVersion[1]) === 2 && (Number(parsedVersion[2]) < 1 || (Number(parsedVersion[2]) === 1 && Number(parsedVersion[3]) < 287)))) {
-  throw new Error("Claude Code 2.1.287 or newer is required for Mods");
+  const version = run(["--version"]);
+  report(version, "version");
+  const parsedVersion = parseClaudeVersion(version.stdout);
+  if (!parsedVersion || !supportsClaudeMods(parsedVersion)) {
+    step = "version";
+    throw new Error(`Mod 需要 Claude Code ${MOD_MINIMUM_CLAUDE_VERSION} 或更新版本`);
+  }
+  const shouldEnable = jsonFile(join(configDir, "settings.json")).enabledPlugins?.[pluginID] === undefined;
+  assertMarketplaceOwned();
+  await mkdir(dirname(pluginSource), { recursive: true, mode: 0o700 });
+  const stage = `${pluginSource}.stage-${process.pid}`;
+  const backup = `${pluginSource}.previous-${process.pid}`;
+  await rm(stage, { recursive: true, force: true });
+  await cp(join(root, "mod"), stage, { recursive: true });
+  const hooksPath = join(stage, "hooks", "hooks.json");
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8"));
+  for (const group of hooks.hooks?.PermissionRequest || []) for (const hook of group.hooks || []) {
+    if (hook.type === "command") hook.command = `${hookQuote(process.execPath)} ${hookQuote(join(pluginSource, "hooks", "permission-request.mjs"))}`;
+  }
+  await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n", { mode: 0o600 });
+  const marketplaceFile = join(marketplaceDir, ".claude-plugin", "marketplace.json");
+  const marketplaceFileStage = `${marketplaceFile}.${process.pid}.tmp`;
+  await mkdir(dirname(marketplaceFile), { recursive: true, mode: 0o700 });
+  await writeFile(marketplaceFileStage, JSON.stringify({
+    name: marketplaceName,
+    owner: { name: "Prism" },
+    plugins: [{ name: pluginName, description: "Local Prism controls for native Claude Code sessions", source: "./plugins/prism-terminal-control" }],
+  }, null, 2) + "\n", { mode: 0o600 });
+  let movedOld = false;
+  let installed = false;
+  try {
+    if (existsSync(pluginSource)) { await rename(pluginSource, backup); movedOld = true; }
+    await rename(stage, pluginSource);
+    await rename(marketplaceFileStage, marketplaceFile);
+    const add = run(["plugin", "marketplace", "add", marketplaceDir]);
+    if (add.status !== 0) report(run(["plugin", "marketplace", "update", marketplaceName]), "marketplace");
+    const update = run(["plugin", "update", pluginID, "--scope", "user"]);
+    if (update.status !== 0) report(run(["plugin", "install", pluginID, "--scope", "user", "--json"]), "plugin");
+    if (shouldEnable && jsonFile(join(configDir, "settings.json")).enabledPlugins?.[pluginID] !== true) report(run(["plugin", "enable", pluginID, "--scope", "user", "--json"]), "enable");
+    // Claude 更新时会保留同版本缓存，因此原子刷新 Prism 自有的 Mod 模块。
+    const modVersion = jsonFile(join(pluginSource, ".claude-plugin", "plugin.json")).version;
+    if (typeof modVersion === "string" && /^\d+\.\d+\.\d+$/.test(modVersion)) {
+      const cachedModule = join(configDir, "plugins", "cache", marketplaceName, pluginName, modVersion, "hooks", "register.js");
+      if (existsSync(cachedModule)) {
+        const temporary = `${cachedModule}.prism-${process.pid}.tmp`;
+        await writeFile(temporary, await readFile(join(pluginSource, "hooks", "register.js")), {mode:0o600});
+        await rename(temporary, cachedModule);
+      }
+    }
+    installed = true;
+    await removeOldShellIntegration();
+    await rm(backup, { recursive: true, force: true });
+    await rm(failurePath, { force: true });
+    process.stdout.write(`Claude Code Mod 操作完成（Claude Code ${parsedVersion}）。\n`);
+  } catch (error) {
+    if (!installed) {
+      await rm(pluginSource, { recursive: true, force: true });
+      if (movedOld) await rename(backup, pluginSource);
+    }
+    throw error;
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+    await rm(marketplaceFileStage, { force: true });
+  }
 }
-assertMarketplaceOwned();
-await mkdir(dirname(pluginSource), { recursive: true, mode: 0o700 });
-const stage = `${pluginSource}.stage-${process.pid}`;
-const backup = `${pluginSource}.previous-${process.pid}`;
-await rm(stage, { recursive: true, force: true });
-await cp(join(root, "mod"), stage, { recursive: true });
-const hooksPath = join(stage, "hooks", "hooks.json");
-const hooks = JSON.parse(await readFile(hooksPath, "utf8"));
-for (const group of hooks.hooks?.PermissionRequest || []) for (const hook of group.hooks || []) {
-  if (hook.type === "command") hook.command = `${hookQuote(process.execPath)} ${hookQuote(join(pluginSource, "hooks", "permission-request.mjs"))}`;
-}
-await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n", { mode: 0o600 });
-const marketplaceFile = join(marketplaceDir, ".claude-plugin", "marketplace.json");
-const marketplaceFileStage = `${marketplaceFile}.${process.pid}.tmp`;
-await mkdir(dirname(marketplaceFile), { recursive: true, mode: 0o700 });
-await writeFile(marketplaceFileStage, JSON.stringify({
-  name: marketplaceName,
-  owner: { name: "Prism" },
-  plugins: [{ name: pluginName, description: "Local Prism controls for native Claude Code sessions", source: "./plugins/prism-terminal-control" }],
-}, null, 2) + "\n", { mode: 0o600 });
-let movedOld = false;
-let installed = false;
 try {
-  if (existsSync(pluginSource)) { await rename(pluginSource, backup); movedOld = true; }
-  await rename(stage, pluginSource);
-  await rename(marketplaceFileStage, marketplaceFile);
-  const add = run(["plugin", "marketplace", "add", marketplaceDir]);
-  if (add.status !== 0) report(run(["plugin", "marketplace", "update", marketplaceName]), "Claude marketplace update");
-  const update = run(["plugin", "update", pluginID, "--scope", "user"]);
-  if (update.status !== 0) report(run(["plugin", "install", pluginID, "--scope", "user", "--json"]), "Claude Mod install");
-  if (shouldEnable && jsonFile(join(configDir, "settings.json")).enabledPlugins?.[pluginID] !== true) report(run(["plugin", "enable", pluginID, "--scope", "user", "--json"]), "Claude Mod enable");
-  // Claude's update command keeps a same-version cache, even when a local
-  // marketplace's development module changed. Refresh our owned module atomically.
-  const modVersion = jsonFile(join(pluginSource, ".claude-plugin", "plugin.json")).version;
-  if (typeof modVersion === "string" && /^\d+\.\d+\.\d+$/.test(modVersion)) {
-    const cachedModule = join(configDir, "plugins", "cache", marketplaceName, pluginName, modVersion, "hooks", "register.js");
-    if (existsSync(cachedModule)) {
-      const temporary = `${cachedModule}.prism-${process.pid}.tmp`;
-      await writeFile(temporary, await readFile(join(pluginSource, "hooks", "register.js")), {mode:0o600});
-      await rename(temporary, cachedModule);
+  await main();
+  if (action !== "uninstall" && jsonFile(join(configDir, "settings.json")).enabledPlugins?.[pluginID] === false) {
+    process.stderr.write("Claude Code Mod 已禁用。\n");
+    process.exitCode = 1;
+  }
+} catch (error) {
+  const failure = modInstallFailure(step, error, exitStatus);
+  if (action === "install" || action === "update") {
+    const temporary = `${failurePath}.${process.pid}.tmp`;
+    try {
+      await mkdir(stateDir, { recursive: true, mode: 0o700 });
+      await writeFile(temporary, JSON.stringify(failure), { mode: 0o600 });
+      await rename(temporary, failurePath);
+    } catch {
+      await rm(temporary, { force: true }).catch(() => {});
     }
   }
-  installed = true;
-  await removeOldShellIntegration();
-  await rm(backup, { recursive: true, force: true });
-  if (explicitlyDisabled) throw new Error("Claude Code Mod remains disabled because the user explicitly disabled it; enable prism-terminal-control@prism-local to restore remote control");
-  process.stdout.write(`Claude Code Mod ${action} completed (${parsedVersion[0]}).\n`);
-} catch (error) {
-  if (!installed) {
-    await rm(pluginSource, { recursive: true, force: true });
-    if (movedOld) await rename(backup, pluginSource);
-  }
-  throw error;
-} finally {
-  await rm(stage, { recursive: true, force: true });
-  await rm(marketplaceFileStage, { force: true });
+  process.stderr.write(failure.detail + "\n");
+  process.exitCode = 1;
 }

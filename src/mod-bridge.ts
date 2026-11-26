@@ -1,3 +1,4 @@
+import { ModHandshakeError } from "./mod-diagnostics.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -38,6 +39,7 @@ export class ModBridge {
   private remoteTurn = new Map<string, { requestId: string; turnId?: string; accepted: boolean; ambiguous: boolean }>();
   private deferredCompletion = new Map<string, ModEvent>();
   private listeners = new Set<(event: ModEvent) => void>();
+  private handshakeRejection?: { sessionID: string; at: number; error: ModHandshakeError };
   private descriptor?: { version: 1; instance_id: string; port: number; token: string };
 
   constructor(readonly stateDir = process.env.PRISM_CLAUDE_MOD_STATE_DIR || join(claudeUserHome(), ".prism", "claudecode")) {
@@ -59,6 +61,29 @@ export class ModBridge {
     writeFileSync(temporary, JSON.stringify(this.descriptor), { mode: 0o600, flag: "w" });
     chmodSync(temporary, 0o600);
     renameSync(temporary, this.descriptorPath);
+  }
+
+  async probeHandshake(): Promise<void> {
+    let descriptor;
+    try { descriptor = JSON.parse(readFileSync(this.descriptorPath, "utf8")); }
+    catch (error) { throw new ModHandshakeError("descriptor", { cause: error }); }
+    if (descriptor?.instance_id !== this.instanceID || descriptor.port !== this.descriptor?.port
+      || descriptor.version !== 1 || typeof descriptor.token !== "string") {
+      throw new ModHandshakeError("descriptor");
+    }
+    let response;
+    try {
+      response = await fetch(`http://127.0.0.1:${descriptor.port}/health`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${descriptor.token}` },
+        signal: AbortSignal.timeout(1500),
+      });
+    } catch (error) { throw new ModHandshakeError("network", { cause: error }); }
+    await response.arrayBuffer();
+    if (!response.ok) throw new ModHandshakeError(response.status);
+    if (this.handshakeRejection && Date.now() - this.handshakeRejection.at < 10_000) {
+      throw this.handshakeRejection.error;
+    }
   }
 
   onEvent(listener: (event: ModEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -162,8 +187,9 @@ export class ModBridge {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader("Access-Control-Allow-Origin", "null");
     res.setHeader("Content-Type", "application/json");
-    if (req.method !== "POST" || !req.url || !["/event", "/next", "/permission", "/resolve-approval"].includes(new URL(req.url, "http://127.0.0.1").pathname)) return this.respond(res, 404, { error: "not_found" });
+    if (req.method !== "POST" || !req.url || !["/health", "/event", "/next", "/permission", "/resolve-approval"].includes(new URL(req.url, "http://127.0.0.1").pathname)) return this.respond(res, 404, { error: "not_found" });
     if (!this.authorized(req)) return this.respond(res, 401, { error: "unauthorized" });
+    if (req.url === "/health") return this.respond(res, 200, { ok: true });
     let body: Record<string, unknown>;
     try { body = await this.readBody(req); } catch { return this.respond(res, 400, { error: "invalid_json" }); }
     const path = new URL(req.url, "http://127.0.0.1").pathname;
@@ -189,7 +215,10 @@ export class ModBridge {
     if (typeof event.clientInstanceId !== "string" || !event.clientInstanceId) return this.respond(res, 400, { error: "missing_client_instance" });
     if ((event.kind === "turn.start" || event.kind === "turn.complete") && typeof event.agentId === "string") return this.respond(res, 204, {});
     if (event.kind === "session.start" || event.kind === "session.current") {
-      if (typeof event.cwd !== "string" || typeof event.version !== "string") return this.respond(res, 400, { error: "invalid_handshake" });
+      if (typeof event.cwd !== "string" || typeof event.version !== "string") {
+        this.handshakeRejection = { sessionID: event.sessionId, at: Date.now(), error: new ModHandshakeError("session") };
+        return this.respond(res, 400, { error: "invalid_handshake" });
+      }
       const previousID = typeof event.previousSessionId === "string" ? event.previousSessionId : "";
       if (previousID && previousID !== event.sessionId) {
         const previous = this.sessions.get(previousID);
@@ -214,10 +243,12 @@ export class ModBridge {
       owners.set(event.clientInstanceId as string, stamp);
       for (const [owner, seen] of owners) if (stamp - seen > 5000) owners.delete(owner);
       if (owners.size > 1) {
+        this.handshakeRejection = { sessionID: event.sessionId, at: Date.now(), error: new ModHandshakeError("session") };
         this.conflictedSessions.add(event.sessionId);
         this.revokeOwner(event.sessionId);
         return this.respond(res, 409, { error: "mod_session_owner_conflict" });
       }
+      if (this.handshakeRejection?.sessionID === event.sessionId) this.handshakeRejection = undefined;
       this.conflictedSessions.delete(event.sessionId);
       if (previous?.client_instance_id && previous.client_instance_id !== event.clientInstanceId) this.revokeOwner(event.sessionId);
       this.sessions.set(event.sessionId, { ...previous, session_id: event.sessionId, cwd: event.cwd as string, ...(typeof event.pid === "number" ? { pid: event.pid } : {}), client_instance_id: event.clientInstanceId as string, version: event.version as string, surface: Array.isArray(event.surface) ? event.surface.filter((x): x is string => typeof x === "string") : [], seen_at: Date.now(), turn_id: typeof event.activeTurnId === "string" ? event.activeTurnId : event.activeTurnId === null ? undefined : previous?.turn_id });

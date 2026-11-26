@@ -12,6 +12,7 @@ import { ManagedSupervisorManager } from "./managed-supervisor-manager.js";
 import { ManagedSupervisorClient } from "./managed-supervisor-client.js";
 import { activeClaudeSessionPID, claudeSessionOwner } from "./claude-session-ownership.js";
 import type { TerminalSnapshot } from "./native-terminal-state.js";
+import { diagnoseClaude } from "./mod-diagnostics.js";
 import { LiveTranscript } from "./live-transcript.js";
 
 const PLUGIN_ID = "claudecode";
@@ -21,7 +22,7 @@ const PLUGIN_ROOT = fileURLToPath(new URL("..", import.meta.url));
 function now(): string { return new Date().toISOString(); }
 function modUnavailableReason(detail: string): string {
   if (process.platform !== "win32") return detail;
-  if (/disabled/i.test(detail)) return "Claude Code Mod 已禁用；请在 Claude Code 中启用 Prism Mod。";
+  if (/disabled|已禁用/i.test(detail)) return "Claude Code Mod 已禁用；请在 Claude Code 中启用 Prism Mod。";
   if (/home|USERPROFILE|用户目录/i.test(detail)) return "找不到 Claude Code 用户目录；请检查 USERPROFILE。";
   return "Claude Code Mod 未就绪；请检查安装或重新安装插件。";
 }
@@ -73,19 +74,27 @@ export class ModClaudeAdapter implements PluginAdapter {
   constructor(baseDir?: string) {
     this.manager = new ManagedSupervisorManager(baseDir, (id, state) => this.publish(id, "desktop.state.changed", "running", "Claude terminal state changed", { detail_snapshot: { terminal: state } }));
     this.bridgeReady = this.bridge.start();
+    void this.bridgeReady.catch(() => {});
     this.bridge.onEvent((event) => this.handleModEvent(event));
   }
   id(): string { return PLUGIN_ID; }
   async probe(): Promise<Capability> {
     const cli = resolveClaudeCLI();
-    const check = runClaudeCLI(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env });
-    const match = check.stdout?.match(/(\d+)\.(\d+)\.(\d+)/);
-    const tuple = match?.slice(1).map(Number);
-    const supported = Boolean(tuple && (tuple[0] > 2 || tuple[0] === 2 && (tuple[1] > 1 || tuple[1] === 1 && tuple[2] >= 287)));
-    if (!check.error && check.status === 0 && supported) {
-      try { await this.ensureModReady(); } catch { /* Report installation failure as unavailable. */ }
-    }
-    const available = !check.error && check.status === 0 && supported && !this.modInstallError;
+    let check: ReturnType<typeof runClaudeCLI> | undefined;
+    try { check = runClaudeCLI(cli.command, ["--version"], { timeout: 3000, encoding: "utf8", env: cli.env }); }
+    catch { /* 启动参数无效时交由版本诊断处理。 */ }
+    const diagnostics = await diagnoseClaude({
+      versionOutput: check?.stdout || "",
+      missing: (check?.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" || (process.platform === "win32" && !existsSync(cli.command) && check?.status === 9009),
+      versionCheckFailed: Boolean(check?.error) || check?.status !== 0,
+      configDir: this.reader.configDir,
+      stateDir: this.bridge.stateDir,
+      handshake: async () => {
+        await this.bridgeReady;
+        await this.bridge.probeHandshake();
+      },
+    });
+    const available = diagnostics.State === "ready";
     const canControl = available;
     return {
       PluginID: PLUGIN_ID, Available: available, NativeVisibleInput: true, NativeVisibleOutput: true,
@@ -94,10 +103,8 @@ export class ModClaudeAdapter implements PluginAdapter {
       CanForwardSync: canControl, CanReverseSync: canControl, CanPluginWideWatch: canControl,
       CanWaitRun: canControl, CanReadStatus: canControl, CanControlSession: canControl, CanOpenManagedTerminal: canControl,
       IntegrationMode: "protocol-native", VisibilitySurface: SURFACE,
-      UnavailableReason: available ? "" : this.modInstallError
-        ? modUnavailableReason(this.modInstallError)
-        : process.platform === "win32" ? "找不到 Claude Code 2.1.287+；请安装 CLI 或检查 PRISM_CLAUDE_CLI。"
-          : `Claude Code 2.1.287+ with Mods is required: ${check.error?.message || check.stderr || check.stdout || "version check failed"}`,
+      UnavailableReason: available ? "" : diagnostics.Detail || diagnostics.Summary,
+      Diagnostics: diagnostics,
     };
   }
   async discover(): Promise<DiscoveryResult> {

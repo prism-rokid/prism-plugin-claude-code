@@ -51,7 +51,8 @@ test("a failed Mod update restores its prior payload and preserves the shell mig
   try {
     const result = f.run({ PRISM_TEST_INSTALL_FAIL: "1" });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /isolated installation failure/);
+    assert.match(result.stderr, /安装或更新 Mod 失败/);
+    assert.doesNotMatch(result.stderr, /isolated installation failure/);
     assert.equal(readFileSync(join(oldPlugin, "previous-payload"), "utf8"), "keep previous version");
     assert.equal(readFileSync(join(f.home, ".zshrc"), "utf8"), before);
   } finally { f.close(); }
@@ -67,7 +68,7 @@ test("Hub initialization cannot silently re-enable a user-disabled installed Mod
   try {
     const result = f.run();
     assert.notEqual(result.status, 0, "explicitly disabled Mod should leave control unavailable");
-    assert.match(result.stderr, /disabled/i);
+    assert.match(result.stderr, /已禁用/);
     assert.equal(readFileSync(join(f.home, ".claude", "settings.json"), "utf8"), settings);
     const log = existsSync(join(f.home, "commands.jsonl")) ? readFileSync(join(f.home, "commands.jsonl"), "utf8") : "";
     assert.equal(log.split("\n").some((line) => line && (JSON.parse(line) as string[])[1] === "enable"), false);

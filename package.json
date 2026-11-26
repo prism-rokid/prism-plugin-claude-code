@@ -12,7 +12,7 @@
     "test": "npm run build && node --test dist/test/**/*.test.js"
   },
   "dependencies": {
-    "@rokid-prism/pluginbridge-plugin-sdk": "file:vendor/rokid-prism-pluginbridge-plugin-sdk-0.1.4.tgz",
+    "@rokid-prism/pluginbridge-plugin-sdk": "file:vendor/rokid-prism-pluginbridge-plugin-sdk-0.1.5.tgz",
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
