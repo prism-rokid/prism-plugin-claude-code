@@ -32,6 +32,7 @@ export type ManagedPtyBrokerOptions = {
   helperPath: string;
   dataDir: string;
   onStateChanged?: (snapshot: TerminalSnapshot) => void;
+  onExit?: () => void;
   onOutput?: (data: string) => void;
   spawner?: ManagedPtySpawner;
   childSpawner?: typeof spawnChild;
@@ -65,6 +66,7 @@ export class ManagedPtyBroker {
   readonly terminalState: NativeTerminalState;
   private server?: Server;
   private client?: Socket;
+  private sockets = new Set<Socket>();
   private token = randomBytes(32).toString("base64url");
   private lineBuffers = new WeakMap<Socket, Buffer>();
   private status: NativeTerminalStatus = "starting";
@@ -119,6 +121,7 @@ export class ManagedPtyBroker {
       this.status = "stopped";
       this.terminalState.setStopped();
       if (this.client) writePacket(this.client, { type: "stopped", exit_code: event.exitCode, signal: event.signal });
+      this.options.onExit?.();
     });
     this.terminalState.setStarted();
   }
@@ -184,7 +187,7 @@ export class ManagedPtyBroker {
   async close(): Promise<void> {
     this.attachWaiter?.reject(new Error("managed_session_not_found"));
     this.ptyDataSubscription?.dispose();
-    this.client?.destroy();
+    for (const socket of this.sockets) socket.destroy();
     this.client = undefined;
     if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
     this.server = undefined;
@@ -203,11 +206,12 @@ export class ManagedPtyBroker {
   }
 
   private accept(socket: Socket): void {
+    this.sockets.add(socket);
     socket.setNoDelay(true);
     this.lineBuffers.set(socket, Buffer.alloc(0));
     socket.on("data", (chunk) => this.consume(socket, Buffer.from(chunk)));
     socket.on("error", () => { if (this.client === socket) this.detach(socket); });
-    socket.on("close", () => { if (this.client === socket) this.detach(socket); });
+    socket.on("close", () => { this.sockets.delete(socket); if (this.client === socket) this.detach(socket); });
   }
 
   private consume(socket: Socket, chunk: Buffer): void {

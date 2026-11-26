@@ -21,11 +21,12 @@ export class ManagedSupervisor {
   private authorized = new WeakSet<Socket>();
   private closing = false;
 
-  constructor(private readonly options: Omit<ManagedPtyBrokerOptions, "onStateChanged">, private readonly onClosed: () => void = () => {}) {
+  constructor(private readonly options: Omit<ManagedPtyBrokerOptions, "onStateChanged" | "onExit">, private readonly onClosed: () => void = () => {}) {
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.descriptorPath = join(options.dataDir, "supervisor.json");
     this.broker = new ManagedPtyBroker({
       ...options,
+      onExit: () => { setImmediate(() => { void this.close(); }); },
       onStateChanged: (terminal) => this.broadcast({ event: "terminal", terminal }),
     });
   }

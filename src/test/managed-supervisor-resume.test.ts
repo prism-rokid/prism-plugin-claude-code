@@ -6,32 +6,37 @@ import { join } from "node:path";
 import test from "node:test";
 import { ManagedSupervisorManager } from "../managed-supervisor-manager.js";
 
-test("Windows supervisor exits after shutdown even when the ConPTY child already stopped", {skip:process.platform!=="win32"}, async()=>{
-  const root=mkdtempSync(join(tmpdir(),"prism supervisor shutdown "));
-  const previous=process.env.PRISM_CLAUDE_CLI;
-  const cli=join(root,"claude.cmd");
-  writeFileSync(cli,"@echo off\r\necho PRISM_SUPERVISOR_EXIT\r\n");
-  const manager=new ManagedSupervisorManager(join(root,"managed"));
-  let pid: number|undefined;
-  const alive=()=>{try{process.kill(pid!,0);return true;}catch{return false;}};
-  try{
-    process.env.PRISM_CLAUDE_CLI=cli;
-    const {sessionID,client}=await manager.create(root);
-    pid=client.descriptor.pid;
-    const stoppedDeadline=Date.now()+5000;
-    while(Date.now()<stoppedDeadline&&(await client.refresh()).status!=="stopped")await new Promise(r=>setTimeout(r,25));
-    assert.equal((await client.refresh()).status,"stopped");
-    await client.shutdown();
-    const deadline=Date.now()+5000;
-    while(Date.now()<deadline&&alive())await new Promise(r=>setTimeout(r,25));
-    assert.equal(alive(),false,"supervisor retained the ConPTY worker after shutdown");
-    assert.equal(manager.hasSafelyClosedState(sessionID),true);
-  }finally{
+test("supervisor releases its PID and records a safe close when Claude exits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "prism supervisor exit "));
+  const previous = process.env.PRISM_CLAUDE_CLI;
+  const windows = process.platform === "win32";
+  const cli = join(root, windows ? "claude.cmd" : "claude");
+  const marker = join(root, "exit-requested");
+  writeFileSync(cli, windows
+    ? "@echo off\r\n:wait\r\nif exist exit-requested exit /b 0\r\nping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n"
+    : "#!/bin/sh\nwhile [ ! -f exit-requested ]; do sleep 0.1; done\n", { mode: 0o700 });
+  const manager = new ManagedSupervisorManager(join(root, "managed"));
+  let pid: number | undefined;
+  function alive() {
+    if (!pid) return false;
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  }
+  try {
+    process.env.PRISM_CLAUDE_CLI = cli;
+    const { sessionID, client } = await manager.create(root);
+    pid = client.descriptor.pid;
     manager.close();
-    if(pid&&alive())process.kill(pid);
-    if(previous===undefined)delete process.env.PRISM_CLAUDE_CLI;else process.env.PRISM_CLAUDE_CLI=previous;
-    // Conhost can briefly retain the exited process's working directory.
-    await rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:50});
+    writeFileSync(marker, "");
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && alive()) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(alive(), false);
+    assert.equal(manager.hasSafelyClosedState(sessionID), true);
+  } finally {
+    if (pid && alive()) process.kill(pid);
+    manager.close();
+    if (previous === undefined) delete process.env.PRISM_CLAUDE_CLI;
+    else process.env.PRISM_CLAUDE_CLI = previous;
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   }
 });
 
