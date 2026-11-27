@@ -16,7 +16,7 @@ jobs:
       matrix:
         include:
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-15
             # runner_labels: optional self-hosted label set used only when
             # USE_SELF_HOSTED is explicitly true; 'null' uses the hosted runner.
             runner_labels: '["self-hosted","macOS","ARM64"]'
